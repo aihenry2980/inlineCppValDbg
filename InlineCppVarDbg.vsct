@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidInlineCppVarDbgPackage">
+    <Groups>
+      <Group guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleInlineValues" priority="0x0100" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" />
+        <Strings>
+          <ButtonText>Toggle Inline C++ Values</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleValueDisplayMode" priority="0x0110" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" />
+        <Strings>
+          <ButtonText>Toggle inline/end of line</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <Symbols>
+    <GuidSymbol name="guidInlineCppVarDbgPackage" value="{63e068a1-5c78-4229-9118-88306593cf1a}" />
+    <GuidSymbol name="guidInlineCppVarDbgCmdSet" value="{e7737c43-b5a3-4a66-b0a8-b24f4d560d87}">
+      <IDSymbol name="InlineCppVarDbgGroup" value="0x1020" />
+      <IDSymbol name="cmdidToggleInlineValues" value="0x0100" />
+      <IDSymbol name="cmdidToggleValueDisplayMode" value="0x0101" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
