@@ -1,4 +1,5 @@
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Text.Classification;
 using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Text.Tagging;
@@ -20,6 +21,9 @@ namespace InlineCppVarDbg
 
         [Import]
         internal ITextDocumentFactoryService TextDocumentFactoryService { get; set; }
+
+        [Import]
+        internal IClassifierAggregatorService ClassifierAggregatorService { get; set; }
 
         public ITagger<T> CreateTagger<T>(ITextView textView, ITextBuffer buffer) where T : ITag
         {
@@ -49,7 +53,8 @@ namespace InlineCppVarDbg
                     settings = InlineValuesServiceLocator.GetSettings(ServiceProvider);
                 });
 
-            return new InlineValueTagger(wpfTextView, buffer, textDocument.FilePath, bridge, settings) as ITagger<T>;
+            IClassifier classifier = ClassifierAggregatorService?.GetClassifier(buffer);
+            return new InlineValueTagger(wpfTextView, buffer, textDocument.FilePath, bridge, settings, classifier) as ITagger<T>;
         }
     }
 }

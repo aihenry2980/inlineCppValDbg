@@ -20,6 +20,7 @@ namespace InlineCppVarDbg
             InlineValuesServiceLocator.EnsureInitialized(this);
             await ToggleInlineValuesCommand.InitializeAsync(this);
             await ToggleValueDisplayModeCommand.InitializeAsync(this);
+            await ToggleNumericDisplayModeCommand.InitializeAsync(this);
         }
     }
 }

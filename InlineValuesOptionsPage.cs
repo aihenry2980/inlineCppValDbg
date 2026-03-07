@@ -8,15 +8,17 @@ namespace InlineCppVarDbg
 {
     public sealed class InlineValuesOptionsPage : DialogPage
     {
-        private const int DefaultPreviousLineCount = 10;
+        private const int DefaultPreviousLineCount = 20;
         private const InlineValueDisplayMode DefaultDisplayMode = InlineValueDisplayMode.Inline;
-        private const string DefaultValueBackgroundColor = "#E5E5E5";
-        private const string DefaultValueChangedAccentColor = "#FF0000";
+        private const string DefaultValueBackgroundColor = "#c0f3b9";
+        private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
+        private const string DefaultValueChangedAccentColor = "#FF8FB1";
         private const int DefaultValueChipFontSize = 10;
         private int previousLineCount = DefaultPreviousLineCount;
         private InlineValueDisplayMode displayMode = DefaultDisplayMode;
-        private Color valueBackgroundColor = ParseHexColor(DefaultValueBackgroundColor);
-        private Color valueChangedAccentColor = ParseHexColor(DefaultValueChangedAccentColor);
+        private Color valueBackgroundColor = ParseHexColor(DefaultValueBackgroundColor, DefaultValueBackgroundColor);
+        private Color uninitializedValueBackgroundColor = ParseHexColor(DefaultUninitializedValueBackgroundColor, DefaultUninitializedValueBackgroundColor);
+        private Color valueChangedAccentColor = ParseHexColor(DefaultValueChangedAccentColor, DefaultValueChangedAccentColor);
         private int valueChipFontSize = DefaultValueChipFontSize;
 
         [Category("General")]
@@ -48,6 +50,16 @@ namespace InlineCppVarDbg
         }
 
         [Category("Appearance")]
+        [DisplayName("Uninitialized chip background")]
+        [Description("Background color used for uninitialized values (Not Init).")]
+        [Editor(typeof(ColorEditor), typeof(System.Drawing.Design.UITypeEditor))]
+        public Color UninitializedValueBackgroundColor
+        {
+            get => uninitializedValueBackgroundColor;
+            set => uninitializedValueBackgroundColor = value;
+        }
+
+        [Category("Appearance")]
         [DisplayName("Changed value accent")]
         [Description("Accent color used when a value changes after stepping.")]
         [Editor(typeof(ColorEditor), typeof(System.Drawing.Design.UITypeEditor))]
@@ -76,8 +88,9 @@ namespace InlineCppVarDbg
                 InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(serviceProvider);
                 previousLineCount = settings.PreviousLineCount;
                 displayMode = settings.DisplayMode;
-                valueBackgroundColor = ParseHexColor(settings.ValueBackgroundColor);
-                valueChangedAccentColor = ParseHexColor(settings.ValueChangedAccentColor);
+                valueBackgroundColor = ParseHexColor(settings.ValueBackgroundColor, DefaultValueBackgroundColor);
+                uninitializedValueBackgroundColor = ParseHexColor(settings.UninitializedValueBackgroundColor, DefaultUninitializedValueBackgroundColor);
+                valueChangedAccentColor = ParseHexColor(settings.ValueChangedAccentColor, DefaultValueChangedAccentColor);
                 valueChipFontSize = settings.ValueChipFontSize;
             }
         }
@@ -93,16 +106,17 @@ namespace InlineCppVarDbg
                 settings.SetPreviousLineCount(previousLineCount);
                 settings.SetDisplayMode(displayMode);
                 settings.SetValueBackgroundColor(ToHex(valueBackgroundColor));
+                settings.SetUninitializedValueBackgroundColor(ToHex(uninitializedValueBackgroundColor));
                 settings.SetValueChangedAccentColor(ToHex(valueChangedAccentColor));
                 settings.SetValueChipFontSize(valueChipFontSize);
             }
         }
 
-        private static Color ParseHexColor(string value)
+        private static Color ParseHexColor(string value, string fallbackHex)
         {
             if (string.IsNullOrWhiteSpace(value))
             {
-                return ColorTranslator.FromHtml(DefaultValueBackgroundColor);
+                return ColorTranslator.FromHtml(fallbackHex);
             }
 
             try
@@ -111,7 +125,7 @@ namespace InlineCppVarDbg
             }
             catch
             {
-                return ColorTranslator.FromHtml(DefaultValueBackgroundColor);
+                return ColorTranslator.FromHtml(fallbackHex);
             }
         }
 

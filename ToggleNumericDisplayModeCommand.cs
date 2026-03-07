@@ -6,14 +6,14 @@ using System.Threading.Tasks;
 
 namespace InlineCppVarDbg
 {
-    internal sealed class ToggleValueDisplayModeCommand
+    internal sealed class ToggleNumericDisplayModeCommand
     {
-        public const int CommandId = 0x0101;
+        public const int CommandId = 0x0102;
         public static readonly Guid CommandSet = new Guid("e7737c43-b5a3-4a66-b0a8-b24f4d560d87");
 
         private readonly AsyncPackage package;
 
-        private ToggleValueDisplayModeCommand(AsyncPackage package, OleMenuCommandService commandService)
+        private ToggleNumericDisplayModeCommand(AsyncPackage package, OleMenuCommandService commandService)
         {
             this.package = package;
             AddCommand(commandService, CommandId);
@@ -26,7 +26,7 @@ namespace InlineCppVarDbg
             var commandService = await package.GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
             if (commandService != null)
             {
-                new ToggleValueDisplayModeCommand(package, commandService);
+                new ToggleNumericDisplayModeCommand(package, commandService);
             }
         }
 
@@ -35,10 +35,7 @@ namespace InlineCppVarDbg
             ThreadHelper.ThrowIfNotOnUIThread();
 
             InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(package);
-            InlineValueDisplayMode nextMode = settings.DisplayMode == InlineValueDisplayMode.EndOfLine
-                ? InlineValueDisplayMode.Inline
-                : InlineValueDisplayMode.EndOfLine;
-            settings.SetDisplayMode(nextMode);
+            settings.SetNumericDisplayMode(Next(settings.NumericDisplayMode));
 
             DebuggerBridge bridge = InlineValuesServiceLocator.GetBridge(package);
             bridge.RaiseExternalInvalidate();
@@ -62,12 +59,36 @@ namespace InlineCppVarDbg
             }
 
             InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(package);
-            bool isInline = settings.DisplayMode == InlineValueDisplayMode.Inline;
+            InlineValueNumericDisplayMode mode = settings.NumericDisplayMode;
 
             menuCommand.Visible = true;
             menuCommand.Enabled = true;
             menuCommand.Checked = false;
-            menuCommand.Text = isInline ? "IN/end" : "in/END";
+            switch (mode)
+            {
+                case InlineValueNumericDisplayMode.Hexadecimal:
+                    menuCommand.Text = "H/d/b";
+                    break;
+                case InlineValueNumericDisplayMode.Binary:
+                    menuCommand.Text = "h/d/B";
+                    break;
+                default:
+                    menuCommand.Text = "h/D/b";
+                    break;
+            }
+        }
+
+        private static InlineValueNumericDisplayMode Next(InlineValueNumericDisplayMode current)
+        {
+            switch (current)
+            {
+                case InlineValueNumericDisplayMode.Decimal:
+                    return InlineValueNumericDisplayMode.Hexadecimal;
+                case InlineValueNumericDisplayMode.Hexadecimal:
+                    return InlineValueNumericDisplayMode.Binary;
+                default:
+                    return InlineValueNumericDisplayMode.Decimal;
+            }
         }
     }
 }

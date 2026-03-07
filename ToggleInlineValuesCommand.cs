@@ -1,4 +1,4 @@
-using Microsoft.VisualStudio.Shell;
+﻿using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using System;
 using System.ComponentModel.Design;
@@ -16,11 +16,7 @@ namespace InlineCppVarDbg
         private ToggleInlineValuesCommand(AsyncPackage package, OleMenuCommandService commandService)
         {
             this.package = package;
-
-            var menuCommandId = new CommandID(CommandSet, CommandId);
-            var menuItem = new OleMenuCommand(Execute, menuCommandId);
-            menuItem.BeforeQueryStatus += OnBeforeQueryStatus;
-            commandService.AddCommand(menuItem);
+            AddCommand(commandService, CommandId);
         }
 
         public static async Task InitializeAsync(AsyncPackage package)
@@ -45,20 +41,30 @@ namespace InlineCppVarDbg
             bridge.RaiseExternalInvalidate();
         }
 
+        private void AddCommand(OleMenuCommandService commandService, int commandId)
+        {
+            var menuCommandId = new CommandID(CommandSet, commandId);
+            var menuItem = new OleMenuCommand(Execute, menuCommandId);
+            menuItem.BeforeQueryStatus += OnBeforeQueryStatus;
+            commandService.AddCommand(menuItem);
+        }
+
         private void OnBeforeQueryStatus(object sender, EventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            var menuCommand = sender as OleMenuCommand;
-            if (menuCommand == null)
+            if (!(sender is OleMenuCommand menuCommand))
             {
                 return;
             }
 
             InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(package);
-            menuCommand.Checked = settings.IsEnabled;
-            menuCommand.Enabled = true;
+            bool enabled = settings.IsEnabled;
+
             menuCommand.Visible = true;
+            menuCommand.Enabled = true;
+            menuCommand.Checked = false;
+            menuCommand.Text = enabled ? "ON/off" : "on/OFF";
         }
     }
 }

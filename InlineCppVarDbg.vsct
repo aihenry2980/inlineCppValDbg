@@ -1,37 +1,64 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
   <Extern href="stdidcmd.h" />
   <Extern href="vsshlids.h" />
 
   <Commands package="guidInlineCppVarDbgPackage">
+    <Menus>
+      <Menu guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbar" priority="0x0100" type="Toolbar">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_TOOL_MAINMENU" />
+        <Strings>
+          <ButtonText>Inline C++ Values</ButtonText>
+          <CommandName>Inline C++ Values</CommandName>
+        </Strings>
+      </Menu>
+    </Menus>
+
     <Groups>
       <Group guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
       </Group>
+      <Group guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" priority="0x0100">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbar" />
+      </Group>
     </Groups>
 
     <Buttons>
-      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleInlineValues" priority="0x0100" type="Button">
-        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" />
-        <Strings>
-          <ButtonText>Toggle Inline C++ Values</ButtonText>
-        </Strings>
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleInlineValuesOn" priority="0x0100" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings><ButtonText>ON/off</ButtonText></Strings>
       </Button>
-      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleValueDisplayMode" priority="0x0110" type="Button">
-        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" />
-        <Strings>
-          <ButtonText>Toggle inline/end of line</ButtonText>
-        </Strings>
+
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleValueDisplayModeIn" priority="0x0110" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings><ButtonText>IN/end</ButtonText></Strings>
+      </Button>
+
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleNumericDisplayModeHex" priority="0x0120" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings><ButtonText>h/D/b</ButtonText></Strings>
       </Button>
     </Buttons>
   </Commands>
 
+  <CommandPlacements>
+    <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleInlineValuesOn" priority="0x0100"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
+    <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleValueDisplayModeIn" priority="0x0110"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
+    <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleNumericDisplayModeHex" priority="0x0120"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
+  </CommandPlacements>
+
   <Symbols>
     <GuidSymbol name="guidInlineCppVarDbgPackage" value="{63e068a1-5c78-4229-9118-88306593cf1a}" />
     <GuidSymbol name="guidInlineCppVarDbgCmdSet" value="{e7737c43-b5a3-4a66-b0a8-b24f4d560d87}">
+      <IDSymbol name="InlineCppVarDbgToolbar" value="0x1010" />
       <IDSymbol name="InlineCppVarDbgGroup" value="0x1020" />
-      <IDSymbol name="cmdidToggleInlineValues" value="0x0100" />
-      <IDSymbol name="cmdidToggleValueDisplayMode" value="0x0101" />
+      <IDSymbol name="InlineCppVarDbgToolbarGroup" value="0x1030" />
+      <IDSymbol name="cmdidToggleInlineValuesOn" value="0x0100" />
+      <IDSymbol name="cmdidToggleValueDisplayModeIn" value="0x0101" />
+      <IDSymbol name="cmdidToggleNumericDisplayModeHex" value="0x0102" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

@@ -11,13 +11,18 @@ namespace InlineCppVarDbg
         public const string PreviousLineCountPropertyName = "PreviousLineCount";
         public const string DisplayModePropertyName = "DisplayMode";
         public const string ValueBackgroundColorPropertyName = "ValueBackgroundColor";
+        public const string UninitializedValueBackgroundColorPropertyName = "UninitializedValueBackgroundColor";
         public const string ValueChangedAccentColorPropertyName = "ValueChangedAccentColor";
         public const string ValueChipFontSizePropertyName = "ValueChipFontSize";
-        private const int DefaultPreviousLineCount = 10;
+        public const string NumericDisplayModePropertyName = "NumericDisplayMode";
+        private const int DefaultPreviousLineCount = 20;
         private const InlineValueDisplayMode DefaultDisplayMode = InlineValueDisplayMode.Inline;
+        private const InlineValueNumericDisplayMode DefaultNumericDisplayMode = InlineValueNumericDisplayMode.Decimal;
         private const int MaxPreviousLineCount = 200;
         private const string DefaultValueBackgroundColor = "#E5E5E5";
-        private const string DefaultValueChangedAccentColor = "#FF0000";
+        private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
+        private const string DefaultValueChangedAccentColor = "#FF8FB1";
+        private const string LegacyDefaultValueChangedAccentColor = "#FF0000";
         private const int DefaultValueChipFontSize = 10;
         private const int MinValueChipFontSize = 8;
         private const int MaxValueChipFontSize = 20;
@@ -28,8 +33,10 @@ namespace InlineCppVarDbg
         private int previousLineCount;
         private InlineValueDisplayMode displayMode;
         private string valueBackgroundColor;
+        private string uninitializedValueBackgroundColor;
         private string valueChangedAccentColor;
         private int valueChipFontSize;
+        private InlineValueNumericDisplayMode numericDisplayMode;
 
         public event EventHandler SettingsChanged;
 
@@ -47,8 +54,10 @@ namespace InlineCppVarDbg
             previousLineCount = ReadPreviousLineCountOrDefault();
             displayMode = ReadDisplayModeOrDefault();
             valueBackgroundColor = ReadValueBackgroundColorOrDefault();
+            uninitializedValueBackgroundColor = ReadUninitializedValueBackgroundColorOrDefault();
             valueChangedAccentColor = ReadValueChangedAccentColorOrDefault();
             valueChipFontSize = ReadValueChipFontSizeOrDefault();
+            numericDisplayMode = ReadNumericDisplayModeOrDefault();
         }
 
         public bool IsEnabled
@@ -95,6 +104,17 @@ namespace InlineCppVarDbg
             }
         }
 
+        public string UninitializedValueBackgroundColor
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return uninitializedValueBackgroundColor;
+                }
+            }
+        }
+
         public string ValueChangedAccentColor
         {
             get
@@ -113,6 +133,17 @@ namespace InlineCppVarDbg
                 lock (gate)
                 {
                     return valueChipFontSize;
+                }
+            }
+        }
+
+        public InlineValueNumericDisplayMode NumericDisplayMode
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return numericDisplayMode;
                 }
             }
         }
@@ -254,6 +285,52 @@ namespace InlineCppVarDbg
             }
         }
 
+        public void SetUninitializedValueBackgroundColor(string color)
+        {
+            string normalized = NormalizeColor(color, DefaultUninitializedValueBackgroundColor);
+            bool changed;
+
+            lock (gate)
+            {
+                if (string.Equals(uninitializedValueBackgroundColor, normalized, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                uninitializedValueBackgroundColor = normalized;
+                PersistUninitializedValueBackgroundColor(normalized);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                SettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        public void SetNumericDisplayMode(InlineValueNumericDisplayMode mode)
+        {
+            InlineValueNumericDisplayMode normalized = NormalizeNumericDisplayMode(mode);
+            bool changed;
+
+            lock (gate)
+            {
+                if (numericDisplayMode == normalized)
+                {
+                    return;
+                }
+
+                numericDisplayMode = normalized;
+                PersistNumericDisplayMode(normalized);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                SettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
         private bool ReadEnabledOrDefault()
         {
             if (store.PropertyExists(CollectionPath, EnabledPropertyName))
@@ -326,13 +403,38 @@ namespace InlineCppVarDbg
             return DefaultDisplayMode;
         }
 
+        private string ReadUninitializedValueBackgroundColorOrDefault()
+        {
+            if (store.PropertyExists(CollectionPath, UninitializedValueBackgroundColorPropertyName))
+            {
+                try
+                {
+                    return NormalizeColor(store.GetString(CollectionPath, UninitializedValueBackgroundColorPropertyName), DefaultUninitializedValueBackgroundColor);
+                }
+                catch
+                {
+                    return DefaultUninitializedValueBackgroundColor;
+                }
+            }
+
+            PersistUninitializedValueBackgroundColor(DefaultUninitializedValueBackgroundColor);
+            return DefaultUninitializedValueBackgroundColor;
+        }
+
         private string ReadValueChangedAccentColorOrDefault()
         {
             if (store.PropertyExists(CollectionPath, ValueChangedAccentColorPropertyName))
             {
                 try
                 {
-                    return NormalizeColor(store.GetString(CollectionPath, ValueChangedAccentColorPropertyName), DefaultValueChangedAccentColor);
+                    string normalized = NormalizeColor(store.GetString(CollectionPath, ValueChangedAccentColorPropertyName), DefaultValueChangedAccentColor);
+                    if (string.Equals(normalized, LegacyDefaultValueChangedAccentColor, StringComparison.OrdinalIgnoreCase))
+                    {
+                        PersistValueChangedAccentColor(DefaultValueChangedAccentColor);
+                        return DefaultValueChangedAccentColor;
+                    }
+
+                    return normalized;
                 }
                 catch
                 {
@@ -362,6 +464,24 @@ namespace InlineCppVarDbg
             return DefaultValueChipFontSize;
         }
 
+        private InlineValueNumericDisplayMode ReadNumericDisplayModeOrDefault()
+        {
+            if (store.PropertyExists(CollectionPath, NumericDisplayModePropertyName))
+            {
+                try
+                {
+                    return NormalizeNumericDisplayMode((InlineValueNumericDisplayMode)store.GetInt32(CollectionPath, NumericDisplayModePropertyName));
+                }
+                catch
+                {
+                    return DefaultNumericDisplayMode;
+                }
+            }
+
+            PersistNumericDisplayMode(DefaultNumericDisplayMode);
+            return DefaultNumericDisplayMode;
+        }
+
         private void PersistEnabled(bool value)
         {
             store.SetBoolean(CollectionPath, EnabledPropertyName, value);
@@ -382,6 +502,11 @@ namespace InlineCppVarDbg
             store.SetInt32(CollectionPath, DisplayModePropertyName, (int)NormalizeDisplayMode(mode));
         }
 
+        private void PersistUninitializedValueBackgroundColor(string value)
+        {
+            store.SetString(CollectionPath, UninitializedValueBackgroundColorPropertyName, NormalizeColor(value, DefaultUninitializedValueBackgroundColor));
+        }
+
         private void PersistValueChangedAccentColor(string value)
         {
             store.SetString(CollectionPath, ValueChangedAccentColorPropertyName, NormalizeColor(value, DefaultValueChangedAccentColor));
@@ -390,6 +515,11 @@ namespace InlineCppVarDbg
         private void PersistValueChipFontSize(int size)
         {
             store.SetInt32(CollectionPath, ValueChipFontSizePropertyName, ClampValueChipFontSize(size));
+        }
+
+        private void PersistNumericDisplayMode(InlineValueNumericDisplayMode mode)
+        {
+            store.SetInt32(CollectionPath, NumericDisplayModePropertyName, (int)NormalizeNumericDisplayMode(mode));
         }
 
         private static int ClampPreviousLineCount(int value)
@@ -427,6 +557,18 @@ namespace InlineCppVarDbg
             if (mode != InlineValueDisplayMode.Inline && mode != InlineValueDisplayMode.EndOfLine)
             {
                 return DefaultDisplayMode;
+            }
+
+            return mode;
+        }
+
+        private static InlineValueNumericDisplayMode NormalizeNumericDisplayMode(InlineValueNumericDisplayMode mode)
+        {
+            if (mode != InlineValueNumericDisplayMode.Decimal &&
+                mode != InlineValueNumericDisplayMode.Hexadecimal &&
+                mode != InlineValueNumericDisplayMode.Binary)
+            {
+                return DefaultNumericDisplayMode;
             }
 
             return mode;
