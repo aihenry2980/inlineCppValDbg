@@ -30,8 +30,6 @@ namespace InlineCppVarDbg
         private const int EmergencyHardBudgetMs = 60;
         private const int EmergencyPerExpressionTimeoutMs = 5;
         private const int EmergencyModeStepCount = 5;
-        private const int FastModeMaxPreviousLines = 20;
-        private const int EmergencyModeMaxPreviousLines = 3;
         private const long PerfLogThresholdMs = 250;
         private const long SlowEvaluationThresholdMs = 25;
         private const string NullValueMarker = "\u0001N:";
@@ -278,6 +276,12 @@ namespace InlineCppVarDbg
                         getterCalls.Add(getterCall);
                     }
 
+                    if (TryParseArrayIndexAccess(lineText, token, out GetterCallToken indexedCall))
+                    {
+                        getterCalls.Add(indexedCall);
+                        continue;
+                    }
+
                     if (IsPointerReceiverForGetterCall(lineText, token))
                     {
                         continue;
@@ -294,12 +298,6 @@ namespace InlineCppVarDbg
                 tokensByLine.Add(new LineTokens(line, tokens, getterCalls));
                 allTokens.AddRange(tokens);
                 allGetterCalls.AddRange(getterCalls);
-            }
-
-            int candidateCount = allTokens.Select(t => t.Name).Distinct(StringComparer.Ordinal).Count() + parameterNames.Count;
-            if (evaluationPolicy.AllowGetterCalls)
-            {
-                candidateCount += allGetterCalls.Select(g => g.ExpressionText).Distinct(StringComparer.Ordinal).Count();
             }
 
             if (allTokens.Count == 0 && allGetterCalls.Count == 0 && parameterNames.Count == 0)
@@ -476,16 +474,6 @@ namespace InlineCppVarDbg
                 coveredStartLineNumber = Math.Min(coveredStartLineNumber, parameterAnchorStartLine);
             }
 
-            if (budgetExceeded || evaluationPolicy.IsEmergencyMode)
-            {
-                string modeLabel = evaluationPolicy.IsEmergencyMode ? "Emergency mode" : "Fast mode";
-                string statusText = budgetExceeded
-                    ? string.Format(CultureInfo.InvariantCulture, "{0}: {1}/{2} (budget hit)", modeLabel, latestEntryByIdentifier.Count, candidateCount)
-                    : string.Format(CultureInfo.InvariantCulture, "{0}: {1}/{2}", modeLabel, latestEntryByIdentifier.Count, candidateCount);
-                ITextSnapshotLine currentLine = snapshot.GetLineFromLineNumber(endLineNumber);
-                tagEntries.Add(new TagEntry(currentLine.End.Position, statusText, 0, PositionAffinity.Predecessor, ValueDisplayKind.Status));
-            }
-
             tagEntries = tagEntries
                 .OrderBy(t => t.Position)
                 .ThenBy(t => t.Affinity == PositionAffinity.Successor ? 1 : 0)
@@ -593,7 +581,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions locals = stackFrame.Locals2[true];
                 RecordPerf("StackFrame.Locals2", "Locals2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.SymbolAndInteger);
+                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly);
             }
             catch (COMException)
             {
@@ -609,7 +597,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions arguments = stackFrame.Arguments2[true];
                 RecordPerf("StackFrame.Arguments2", "Arguments2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.SymbolAndInteger);
+                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly);
             }
             catch (COMException)
             {
@@ -681,25 +669,30 @@ namespace InlineCppVarDbg
                         continue;
                     }
 
-                    if (!IsSimpleReturnType(expression.Type))
-                    {
-                        continue;
-                    }
-
                     string normalized = NormalizeValue(expression.Value);
                     if (string.IsNullOrEmpty(normalized))
                     {
                         continue;
                     }
 
-                    ThreadHelper.ThrowIfNotOnUIThread();
-                    if (TryFormatCharPointerOrArrayValue(expression.Type, expression.Value, normalized, out string charDisplay))
+                    if (!IsDisplayableGetterReturnType(expression.Type, expression.Value, normalized))
                     {
-                        normalized = charDisplay;
+                        continue;
                     }
-                    else if (TryFormatUninitializedValue(expression.Type, expression.Value, normalized, out string uninitDisplay))
+
+                    ThreadHelper.ThrowIfNotOnUIThread();
+                    if (TryFormatUninitializedValue(expression.Type, expression.Value, normalized, out string uninitDisplay))
                     {
                         normalized = uninitDisplay;
+                    }
+                    else if (IsDisplayableEnumType(expression.Type, expression.Value, normalized))
+                    {
+                        if (!TryFormatEnumValue(debugger, getterCall.ExpressionText, expression.Type, expression.Value, normalized, EnumValueRenderMode.IntegerOnly, numericDisplayMode, out string enumDisplay))
+                        {
+                            continue;
+                        }
+
+                        normalized = enumDisplay;
                     }
                     else if (TryFormatNumericValue(numericDisplayMode, expression.Type, normalized, out string numericDisplay))
                     {
@@ -829,25 +822,39 @@ namespace InlineCppVarDbg
             {
                 normalized = nullDisplay;
             }
+            else if (IsSuppressiblePointerType(type))
+            {
+                return;
+            }
+            else if (IsArrayType(type))
+            {
+                if (!TryFormatArrayValue(debugger, evalExpressionName, type, rawValue, normalized, numericDisplayMode, out string arrayDisplay))
+                {
+                    return;
+                }
+
+                normalized = arrayDisplay;
+            }
             else if (TryFormatUninitializedValue(type, rawValue, normalized, out string uninitDisplay))
             {
                 normalized = uninitDisplay;
             }
-            else if (TryFormatEnumValue(debugger, evalExpressionName, type, rawValue, normalized, enumValueRenderMode, numericDisplayMode, out string enumDisplay))
+            else if (IsDisplayableEnumType(type, rawValue, normalized))
             {
+                if (!TryFormatEnumValue(debugger, evalExpressionName, type, rawValue, normalized, EnumValueRenderMode.IntegerOnly, numericDisplayMode, out string enumDisplay))
+                {
+                    return;
+                }
+
                 normalized = enumDisplay;
-            }
-            else if (TryFormatArrayValue(debugger, evalExpressionName, type, rawValue, normalized, numericDisplayMode, out string arrayDisplay))
-            {
-                normalized = arrayDisplay;
-            }
-            else if (TryFormatCharPointerOrArrayValue(debugger, evalExpressionName, type, rawValue, normalized, out string charDisplay))
-            {
-                normalized = charDisplay;
             }
             else if (TryFormatNumericValue(numericDisplayMode, type, normalized, out string numericDisplay))
             {
                 normalized = numericDisplay;
+            }
+            else if (!IsDisplayableScalarType(type) && !IsDisplayableEnumType(type, rawValue, normalized))
+            {
+                return;
             }
 
             if (string.IsNullOrEmpty(normalized))
@@ -1055,7 +1062,7 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            bool likelyEnumType = IsEnumType(type);
+            bool likelyEnumType = IsDisplayableEnumType(type, rawValue, normalizedValue);
             if (!likelyEnumType && !LooksLikeEnumSymbolValue(rawValue, normalizedValue))
             {
                 return false;
@@ -1068,25 +1075,7 @@ namespace InlineCppVarDbg
 
             string formattedInteger = integerText;
             TryFormatNumericLiteral(numericDisplayMode, integerText, out formattedInteger);
-            if (enumValueRenderMode == EnumValueRenderMode.IntegerOnly)
-            {
-                displayValue = formattedInteger;
-                return true;
-            }
-
-            string symbolText = ExtractEnumSymbolText(normalizedValue);
-            if (string.IsNullOrEmpty(symbolText))
-            {
-                symbolText = ExtractEnumSymbolText(rawValue);
-            }
-
-            if (string.IsNullOrEmpty(symbolText))
-            {
-                displayValue = formattedInteger;
-                return true;
-            }
-
-            displayValue = symbolText + " (" + formattedInteger + ")";
+            displayValue = formattedInteger;
             return true;
         }
 
@@ -1260,7 +1249,49 @@ namespace InlineCppVarDbg
             }
         }
 
-        private static bool IsEnumType(string type)
+        private static bool IsDisplayableEnumType(string type, string rawValue, string normalizedValue)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            if (IsSuppressiblePointerType(type) || IsArrayType(type))
+            {
+                return false;
+            }
+
+            if (IsNonDisplayableAggregateType(type))
+            {
+                return false;
+            }
+
+            if (IsExplicitEnumType(type))
+            {
+                return true;
+            }
+
+            // Debugger type strings for enums often omit the "enum" keyword (e.g., plain type name).
+            if (IsLikelyUserDefinedType(type))
+            {
+                return true;
+            }
+
+            return LooksLikeEnumSymbolValue(rawValue, normalizedValue);
+        }
+
+        private static bool IsExplicitEnumType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            return ContainsTypeWord(lower, "enum");
+        }
+
+        private static bool IsNonDisplayableAggregateType(string type)
         {
             if (string.IsNullOrWhiteSpace(type))
             {
@@ -1270,15 +1301,147 @@ namespace InlineCppVarDbg
             string lower = type.ToLowerInvariant();
             if (ContainsTypeWord(lower, "enum"))
             {
-                return true;
-            }
-
-            if (type.IndexOf('*') >= 0 || type.IndexOf('&') >= 0 || type.IndexOf('[') >= 0 || type.IndexOf(']') >= 0)
-            {
                 return false;
             }
 
             if (ContainsTypeWord(lower, "class") || ContainsTypeWord(lower, "struct") || ContainsTypeWord(lower, "union"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsDisplayableScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            if (IsSuppressiblePointerType(type) || IsArrayType(type))
+            {
+                return false;
+            }
+
+            if (IsReferenceToNonDisplayableAggregateType(type) || IsNonDisplayableAggregateType(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            if (ContainsTypeWord(lower, "bool"))
+            {
+                return true;
+            }
+
+            if (ContainsTypeWord(lower, "float") || ContainsTypeWord(lower, "double"))
+            {
+                return true;
+            }
+
+            return ContainsTypeWord(lower, "char") ||
+                   ContainsTypeWord(lower, "wchar_t") ||
+                   ContainsTypeWord(lower, "char8_t") ||
+                   ContainsTypeWord(lower, "char16_t") ||
+                   ContainsTypeWord(lower, "char32_t") ||
+                   ContainsTypeWord(lower, "short") ||
+                   ContainsTypeWord(lower, "int") ||
+                   ContainsTypeWord(lower, "long") ||
+                   ContainsTypeWord(lower, "__int8") ||
+                   ContainsTypeWord(lower, "__int16") ||
+                   ContainsTypeWord(lower, "__int32") ||
+                   ContainsTypeWord(lower, "__int64") ||
+                   ContainsTypeWord(lower, "size_t") ||
+                   ContainsTypeWord(lower, "ptrdiff_t");
+        }
+
+        private static bool IsReferenceToNonDisplayableAggregateType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type) || type.IndexOf('&') < 0)
+            {
+                return false;
+            }
+
+            return IsNonDisplayableAggregateType(type);
+        }
+
+        private static bool IsDisplayableArrayElementType(string type, string rawValue, string normalizedValue)
+        {
+            if (!IsArrayType(type))
+            {
+                return false;
+            }
+
+            string elementType = ExtractArrayElementType(type);
+            if (string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            if (IsSuppressiblePointerType(elementType) || IsNonDisplayableAggregateType(elementType))
+            {
+                return false;
+            }
+
+            if (IsDisplayableScalarType(elementType))
+            {
+                return true;
+            }
+
+            return IsDisplayableEnumType(elementType, rawValue, normalizedValue);
+        }
+
+        private static string ExtractArrayElementType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return string.Empty;
+            }
+
+            int bracketIndex = type.IndexOf('[');
+            if (bracketIndex <= 0)
+            {
+                return string.Empty;
+            }
+
+            return type.Substring(0, bracketIndex).Trim();
+        }
+
+        private static bool IsSuppressiblePointerType(string type)
+        {
+            return IsPointerType(type) || IsFunctionPointerType(type);
+        }
+
+        private static bool IsGetterSupportedType(string type, string rawValue, string normalizedValue)
+        {
+            if (IsSuppressiblePointerType(type) || IsArrayType(type))
+            {
+                return false;
+            }
+
+            return IsDisplayableScalarType(type) || IsDisplayableEnumType(type, rawValue, normalizedValue);
+        }
+
+        private static bool IsDisplayableGetterReturnType(string type, string rawValue, string normalizedValue)
+        {
+            return IsGetterSupportedType(type, rawValue, normalizedValue);
+        }
+
+        private static bool IsIntegralScalarType(string type)
+        {
+            if (!IsDisplayableScalarType(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            if (ContainsTypeWord(lower, "bool"))
+            {
+                return false;
+            }
+
+            if (ContainsTypeWord(lower, "float") || ContainsTypeWord(lower, "double"))
             {
                 return false;
             }
@@ -1292,7 +1455,6 @@ namespace InlineCppVarDbg
                 .Replace(':', ' ');
 
             string[] tokens = normalized.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            bool hasCandidateToken = false;
             foreach (string token in tokens)
             {
                 if (TypeNoiseTokens.Contains(token))
@@ -1302,13 +1464,20 @@ namespace InlineCppVarDbg
 
                 if (PrimitiveTypeTokens.Contains(token))
                 {
-                    return false;
+                    return ContainsTypeWord(lower, "char") ||
+                           ContainsTypeWord(lower, "short") ||
+                           ContainsTypeWord(lower, "int") ||
+                           ContainsTypeWord(lower, "long") ||
+                           ContainsTypeWord(lower, "__int8") ||
+                           ContainsTypeWord(lower, "__int16") ||
+                           ContainsTypeWord(lower, "__int32") ||
+                           ContainsTypeWord(lower, "__int64") ||
+                           ContainsTypeWord(lower, "size_t") ||
+                           ContainsTypeWord(lower, "ptrdiff_t");
                 }
-
-                hasCandidateToken = true;
             }
 
-            return hasCandidateToken;
+            return false;
         }
 
         private static bool LooksLikeEnumSymbolValue(string rawValue, string normalizedValue)
@@ -1362,59 +1531,39 @@ namespace InlineCppVarDbg
             return candidate;
         }
 
-        private static bool IsIntegralScalarType(string type)
-        {
-            if (string.IsNullOrWhiteSpace(type))
-            {
-                return false;
-            }
-
-            if (type.IndexOf('*') >= 0 || type.IndexOf('&') >= 0 || type.IndexOf('[') >= 0 || type.IndexOf(']') >= 0)
-            {
-                return false;
-            }
-
-            string lower = type.ToLowerInvariant();
-            if (ContainsTypeWord(lower, "bool"))
-            {
-                return false;
-            }
-
-            if (ContainsTypeWord(lower, "float") || ContainsTypeWord(lower, "double"))
-            {
-                return false;
-            }
-
-            return ContainsTypeWord(lower, "char") ||
-                   ContainsTypeWord(lower, "short") ||
-                   ContainsTypeWord(lower, "int") ||
-                   ContainsTypeWord(lower, "long") ||
-                   ContainsTypeWord(lower, "__int8") ||
-                   ContainsTypeWord(lower, "__int16") ||
-                   ContainsTypeWord(lower, "__int32") ||
-                   ContainsTypeWord(lower, "__int64") ||
-                   ContainsTypeWord(lower, "size_t") ||
-                   ContainsTypeWord(lower, "ptrdiff_t");
-        }
-
         private static bool ShouldSuppressValue(string type, string normalizedValue)
         {
-            if (IsFunctionPointerType(type))
+            if (string.IsNullOrWhiteSpace(type) || string.IsNullOrEmpty(normalizedValue))
             {
                 return true;
             }
 
-            if (IsStructValueType(type, normalizedValue))
-            {
-                return true;
-            }
-
-            if (!IsAddressLikeValue(normalizedValue))
+            if (normalizedValue.StartsWith(NullValueMarker, StringComparison.Ordinal))
             {
                 return false;
             }
 
-            return IsLikelyClassOrStructPointerType(type);
+            if (IsSuppressiblePointerType(type))
+            {
+                return true;
+            }
+
+            if (IsArrayType(type))
+            {
+                return false;
+            }
+
+            if (IsDisplayableEnumType(type, null, normalizedValue))
+            {
+                return false;
+            }
+
+            if (IsDisplayableScalarType(type))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private static bool IsArrayType(string type)
@@ -1435,7 +1584,7 @@ namespace InlineCppVarDbg
         private static bool TryFormatNullPointerValue(string type, string rawValue, string normalizedValue, out string displayValue)
         {
             displayValue = normalizedValue;
-            if (!IsPointerType(type))
+            if (!IsPointerType(type) || IsFunctionPointerType(type))
             {
                 return false;
             }
@@ -1463,7 +1612,7 @@ namespace InlineCppVarDbg
                 return true;
             }
 
-            if (!IsPointerType(type) && !IsIntegralScalarType(type))
+            if (!IsDisplayableScalarType(type))
             {
                 return false;
             }
@@ -1673,6 +1822,22 @@ namespace InlineCppVarDbg
                 return false;
             }
 
+            if (!IsDisplayableArrayElementType(type, rawValue, normalizedValue))
+            {
+                return false;
+            }
+
+            if (IsCharacterArrayType(type) &&
+                (TryExtractQuotedStringContent(rawValue, out string content) || TryExtractQuotedStringContent(normalizedValue, out content)))
+            {
+                List<string> entriesFromString = BuildCharArrayEntries(content, 3, out bool hasMoreFromString);
+                if (entriesFromString.Count > 0)
+                {
+                    displayValue = FormatArrayEntries(entriesFromString, hasMoreFromString, numericDisplayMode);
+                    return true;
+                }
+            }
+
             if (TryExtractArrayEntries(rawValue, out List<string> fromRaw, out bool fromRawHasMore))
             {
                 displayValue = FormatArrayEntries(fromRaw, fromRawHasMore, numericDisplayMode);
@@ -1692,9 +1857,62 @@ namespace InlineCppVarDbg
                 return true;
             }
 
-            // Array value exists but we could not resolve concrete entries without showing an address.
-            displayValue = "...";
-            return true;
+            return false;
+        }
+
+        private static bool IsCharacterArrayType(string type)
+        {
+            string elementType = ExtractArrayElementType(type).ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            return ContainsTypeWord(elementType, "char") ||
+                   ContainsTypeWord(elementType, "wchar_t") ||
+                   ContainsTypeWord(elementType, "char8_t") ||
+                   ContainsTypeWord(elementType, "char16_t") ||
+                   ContainsTypeWord(elementType, "char32_t");
+        }
+
+        private static List<string> BuildCharArrayEntries(string content, int maxEntries, out bool hasMore)
+        {
+            var entries = new List<string>(maxEntries);
+            hasMore = false;
+            if (string.IsNullOrEmpty(content) || maxEntries <= 0)
+            {
+                return entries;
+            }
+
+            int limit = Math.Min(content.Length, maxEntries);
+            for (int i = 0; i < limit; i++)
+            {
+                entries.Add("'" + EscapeCharForChip(content[i]) + "'");
+            }
+
+            hasMore = content.Length > maxEntries;
+            return entries;
+        }
+
+        private static string EscapeCharForChip(char ch)
+        {
+            switch (ch)
+            {
+                case '\0':
+                    return "\\0";
+                case '\n':
+                    return "\\n";
+                case '\r':
+                    return "\\r";
+                case '\t':
+                    return "\\t";
+                case '\'':
+                    return "\\'";
+                case '\\':
+                    return "\\\\";
+                default:
+                    return ch.ToString();
+            }
         }
 
         private static string FormatArrayEntries(
@@ -2758,56 +2976,27 @@ namespace InlineCppVarDbg
             return ch == '_' || char.IsLetterOrDigit(ch);
         }
 
-        private static bool IsSimpleReturnType(string type)
+        private static bool IsValidIdentifier(string value)
         {
-            if (string.IsNullOrWhiteSpace(type))
+            if (string.IsNullOrWhiteSpace(value))
             {
                 return false;
             }
 
-            if (type.IndexOf('*') >= 0 || type.IndexOf('&') >= 0 || type.IndexOf('[') >= 0 || type.IndexOf(']') >= 0)
+            if (!(value[0] == '_' || char.IsLetter(value[0])))
             {
                 return false;
             }
 
-            string lower = type.ToLowerInvariant();
-            if (ContainsTypeWord(lower, "class") || ContainsTypeWord(lower, "struct") || ContainsTypeWord(lower, "union"))
+            for (int i = 1; i < value.Length; i++)
             {
-                return false;
-            }
-
-            string normalized = lower
-                .Replace('(', ' ')
-                .Replace(')', ' ')
-                .Replace(',', ' ')
-                .Replace('<', ' ')
-                .Replace('>', ' ')
-                .Replace(':', ' ');
-
-            string[] tokens = normalized.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            bool sawPrimitive = false;
-            foreach (string token in tokens)
-            {
-                if (TypeNoiseTokens.Contains(token))
-                {
-                    continue;
-                }
-
-                if (string.Equals(token, "void", StringComparison.OrdinalIgnoreCase))
+                if (!IsWordChar(value[i]))
                 {
                     return false;
                 }
-
-                if (PrimitiveTypeTokens.Contains(token))
-                {
-                    sawPrimitive = true;
-                    continue;
-                }
-
-                return false;
             }
 
-            return sawPrimitive;
+            return true;
         }
 
         private static HashSet<string> GetStackFrameParameterNames(StackFrame2 stackFrame)
@@ -3251,7 +3440,7 @@ namespace InlineCppVarDbg
         private static bool TryParseGetterCall(string lineText, CppCurrentLineTokenizer.IdentifierToken token, out GetterCallToken getterCall)
         {
             getterCall = default;
-            if (!token.Name.StartsWith("get", StringComparison.OrdinalIgnoreCase))
+            if (!IsGetterLikeName(token.Name))
             {
                 return false;
             }
@@ -3272,6 +3461,12 @@ namespace InlineCppVarDbg
                 return false;
             }
 
+            string argumentsText = lineText.Substring(openParenIndex + 1, closeParenIndex - openParenIndex - 1);
+            if (!string.IsNullOrWhiteSpace(argumentsText))
+            {
+                return false;
+            }
+
             int expressionStart = FindGetterExpressionStart(lineText, token.Start);
             if (expressionStart < 0 || expressionStart > token.Start || closeParenIndex < expressionStart)
             {
@@ -3284,7 +3479,47 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            getterCall = new GetterCallToken(expressionText, expressionText, closeParenIndex + 1);
+            getterCall = new GetterCallToken(expressionText, expressionText, token.Name, closeParenIndex + 1);
+            return true;
+        }
+
+        private static bool TryParseArrayIndexAccess(string lineText, CppCurrentLineTokenizer.IdentifierToken token, out GetterCallToken indexedCall)
+        {
+            indexedCall = default;
+            if (string.IsNullOrEmpty(lineText))
+            {
+                return false;
+            }
+
+            int openBracketIndex = token.Start + token.Length;
+            while (openBracketIndex < lineText.Length && char.IsWhiteSpace(lineText[openBracketIndex]))
+            {
+                openBracketIndex++;
+            }
+
+            if (openBracketIndex >= lineText.Length || lineText[openBracketIndex] != '[')
+            {
+                return false;
+            }
+
+            if (!TryFindMatchingBracket(lineText, openBracketIndex, out int closeBracketIndex))
+            {
+                return false;
+            }
+
+            string indexText = lineText.Substring(openBracketIndex + 1, closeBracketIndex - openBracketIndex - 1).Trim();
+            if (string.IsNullOrEmpty(indexText))
+            {
+                return false;
+            }
+
+            string expressionText = RemoveWhitespace(lineText.Substring(token.Start, closeBracketIndex - token.Start + 1).Trim());
+            if (string.IsNullOrEmpty(expressionText))
+            {
+                return false;
+            }
+
+            indexedCall = new GetterCallToken(expressionText, expressionText, token.Name, closeBracketIndex + 1);
             return true;
         }
 
@@ -3459,7 +3694,7 @@ namespace InlineCppVarDbg
             }
 
             string memberName = lineText.Substring(nameStart, i - nameStart);
-            if (!memberName.StartsWith("get", StringComparison.OrdinalIgnoreCase))
+            if (!IsGetterLikeName(memberName))
             {
                 return false;
             }
@@ -3470,6 +3705,462 @@ namespace InlineCppVarDbg
             }
 
             return i < lineText.Length && lineText[i] == '(';
+        }
+
+        private static bool IsGetterLikeName(string methodName)
+        {
+            if (string.IsNullOrWhiteSpace(methodName))
+            {
+                return false;
+            }
+
+            return methodName.StartsWith("get", StringComparison.OrdinalIgnoreCase) ||
+                   methodName.StartsWith("is", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasVisibleDirectReturnGetter(ITextSnapshot snapshot, string methodName)
+        {
+            if (snapshot == null || !IsValidIdentifier(methodName))
+            {
+                return false;
+            }
+
+            string text = snapshot.GetText();
+            if (string.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+
+            int searchIndex = 0;
+            while (searchIndex < text.Length)
+            {
+                int methodIndex = text.IndexOf(methodName, searchIndex, StringComparison.Ordinal);
+                if (methodIndex < 0)
+                {
+                    break;
+                }
+
+                searchIndex = methodIndex + methodName.Length;
+                int methodEnd = methodIndex + methodName.Length;
+                bool leftBoundary = methodIndex == 0 || !IsWordChar(text[methodIndex - 1]);
+                bool rightBoundary = methodEnd >= text.Length || !IsWordChar(text[methodEnd]);
+                if (!leftBoundary || !rightBoundary)
+                {
+                    continue;
+                }
+
+                int openParenIndex = SkipWhitespace(text, methodEnd);
+                if (openParenIndex >= text.Length || text[openParenIndex] != '(')
+                {
+                    continue;
+                }
+
+                if (!TryFindMatchingPair(text, openParenIndex, '(', ')', out int closeParenIndex))
+                {
+                    continue;
+                }
+
+                string argumentsText = text.Substring(openParenIndex + 1, closeParenIndex - openParenIndex - 1);
+                if (!string.IsNullOrWhiteSpace(argumentsText))
+                {
+                    continue;
+                }
+
+                int bodyStart = TryFindVisibleGetterBodyStart(text, closeParenIndex + 1);
+                if (bodyStart < 0 || bodyStart >= text.Length || text[bodyStart] != '{')
+                {
+                    continue;
+                }
+
+                if (!TryFindMatchingPair(text, bodyStart, '{', '}', out int closeBraceIndex))
+                {
+                    continue;
+                }
+
+                string body = text.Substring(bodyStart + 1, closeBraceIndex - bodyStart - 1);
+                if (IsDirectReturnGetterBody(body))
+                {
+                    return true;
+                }
+
+                searchIndex = closeBraceIndex + 1;
+            }
+
+            return false;
+        }
+
+        private static bool TryFindMatchingBracket(string lineText, int openBracketIndex, out int closeBracketIndex)
+        {
+            closeBracketIndex = -1;
+            int depth = 0;
+            int i = openBracketIndex;
+            while (i < lineText.Length)
+            {
+                char ch = lineText[i];
+                if (ch == '/' && i + 1 < lineText.Length)
+                {
+                    char next = lineText[i + 1];
+                    if (next == '/' || next == '*')
+                    {
+                        break;
+                    }
+                }
+
+                if (ch == '"' || ch == '\'')
+                {
+                    i = SkipQuotedLiteral(lineText, i);
+                    continue;
+                }
+
+                if (ch == '[')
+                {
+                    depth++;
+                }
+                else if (ch == ']')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        closeBracketIndex = i;
+                        return true;
+                    }
+                }
+
+                i++;
+            }
+
+            return false;
+        }
+
+        private static int TryFindVisibleGetterBodyStart(string text, int startIndex)
+        {
+            int index = SkipWhitespaceAndComments(text, startIndex);
+            while (index >= 0 && index < text.Length)
+            {
+                if (text[index] == '{')
+                {
+                    return index;
+                }
+
+                if (text[index] == ';')
+                {
+                    return -1;
+                }
+
+                if (text[index] == '-' && index + 1 < text.Length && text[index + 1] == '>')
+                {
+                    index += 2;
+                    while (index < text.Length)
+                    {
+                        if (text[index] == '{')
+                        {
+                            return index;
+                        }
+
+                        if (text[index] == ';')
+                        {
+                            return -1;
+                        }
+
+                        if (text[index] == '\r' || text[index] == '\n')
+                        {
+                            break;
+                        }
+
+                        index++;
+                    }
+                }
+                else
+                {
+                    int tokenStart = index;
+                    index = ReadWordToken(text, index);
+                    if (tokenStart == index)
+                    {
+                        return -1;
+                    }
+
+                    string token = text.Substring(tokenStart, index - tokenStart);
+                    if (!string.Equals(token, "const", StringComparison.Ordinal) &&
+                        !string.Equals(token, "noexcept", StringComparison.Ordinal) &&
+                        !string.Equals(token, "override", StringComparison.Ordinal) &&
+                        !string.Equals(token, "final", StringComparison.Ordinal))
+                    {
+                        return -1;
+                    }
+                }
+
+                index = SkipWhitespaceAndComments(text, index);
+            }
+
+            return -1;
+        }
+
+        private static bool TryFindMatchingPair(string text, int openIndex, char openChar, char closeChar, out int closeIndex)
+        {
+            closeIndex = -1;
+            if (string.IsNullOrEmpty(text) || openIndex < 0 || openIndex >= text.Length || text[openIndex] != openChar)
+            {
+                return false;
+            }
+
+            int depth = 0;
+            int index = openIndex;
+            while (index < text.Length)
+            {
+                char ch = text[index];
+                if (ch == '/' && index + 1 < text.Length)
+                {
+                    if (text[index + 1] == '/')
+                    {
+                        index = SkipLineComment(text, index + 2);
+                        continue;
+                    }
+
+                    if (text[index + 1] == '*')
+                    {
+                        index = SkipBlockComment(text, index + 2);
+                        continue;
+                    }
+                }
+
+                if (ch == '"' || ch == '\'')
+                {
+                    index = SkipQuotedLiteral(text, index);
+                    continue;
+                }
+
+                if (ch == openChar)
+                {
+                    depth++;
+                }
+                else if (ch == closeChar)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        closeIndex = index;
+                        return true;
+                    }
+                }
+
+                index++;
+            }
+
+            return false;
+        }
+
+        private static bool IsDirectReturnGetterBody(string bodyText)
+        {
+            if (string.IsNullOrWhiteSpace(bodyText))
+            {
+                return false;
+            }
+
+            string compact = StripComments(bodyText).Trim();
+            if (string.IsNullOrEmpty(compact) || compact.IndexOf('#') >= 0)
+            {
+                return false;
+            }
+
+            if (!compact.StartsWith("return", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (compact.Length <= 6 || !char.IsWhiteSpace(compact[6]))
+            {
+                return false;
+            }
+
+            int semicolonIndex = compact.IndexOf(';');
+            if (semicolonIndex < 0 || semicolonIndex != compact.Length - 1)
+            {
+                return false;
+            }
+
+            string expression = compact.Substring(6, semicolonIndex - 6).Trim();
+            if (string.IsNullOrEmpty(expression))
+            {
+                return false;
+            }
+
+            return IsDirectMemberExpression(expression);
+        }
+
+        private static bool IsDirectMemberExpression(string expression)
+        {
+            if (string.IsNullOrWhiteSpace(expression))
+            {
+                return false;
+            }
+
+            int index = 0;
+            bool expectIdentifier = true;
+            while (index < expression.Length)
+            {
+                index = SkipWhitespace(expression, index);
+                if (index >= expression.Length)
+                {
+                    break;
+                }
+
+                if (expectIdentifier)
+                {
+                    int tokenEnd = ReadWordToken(expression, index);
+                    if (tokenEnd <= index)
+                    {
+                        return false;
+                    }
+
+                    index = tokenEnd;
+                    expectIdentifier = false;
+                    continue;
+                }
+
+                if (expression[index] == '.')
+                {
+                    index++;
+                    expectIdentifier = true;
+                    continue;
+                }
+
+                if (expression[index] == '-' && index + 1 < expression.Length && expression[index + 1] == '>')
+                {
+                    index += 2;
+                    expectIdentifier = true;
+                    continue;
+                }
+
+                if (expression[index] == ':' && index + 1 < expression.Length && expression[index + 1] == ':')
+                {
+                    index += 2;
+                    expectIdentifier = true;
+                    continue;
+                }
+
+                return false;
+            }
+
+            return !expectIdentifier;
+        }
+
+        private static int SkipWhitespace(string text, int startIndex)
+        {
+            int index = startIndex;
+            while (index < text.Length && char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+
+            return index;
+        }
+
+        private static int SkipWhitespaceAndComments(string text, int startIndex)
+        {
+            int index = startIndex;
+            while (index >= 0 && index < text.Length)
+            {
+                if (char.IsWhiteSpace(text[index]))
+                {
+                    index++;
+                    continue;
+                }
+
+                if (text[index] == '/' && index + 1 < text.Length)
+                {
+                    if (text[index + 1] == '/')
+                    {
+                        index = SkipLineComment(text, index + 2);
+                        continue;
+                    }
+
+                    if (text[index + 1] == '*')
+                    {
+                        index = SkipBlockComment(text, index + 2);
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
+            return index;
+        }
+
+        private static int SkipLineComment(string text, int startIndex)
+        {
+            int index = startIndex;
+            while (index < text.Length && text[index] != '\r' && text[index] != '\n')
+            {
+                index++;
+            }
+
+            return index;
+        }
+
+        private static int SkipBlockComment(string text, int startIndex)
+        {
+            int index = startIndex;
+            while (index + 1 < text.Length)
+            {
+                if (text[index] == '*' && text[index + 1] == '/')
+                {
+                    return index + 2;
+                }
+
+                index++;
+            }
+
+            return text.Length;
+        }
+
+        private static string StripComments(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
+            }
+
+            var builder = new StringBuilder(text.Length);
+            int index = 0;
+            while (index < text.Length)
+            {
+                if (text[index] == '/' && index + 1 < text.Length)
+                {
+                    if (text[index + 1] == '/')
+                    {
+                        index = SkipLineComment(text, index + 2);
+                        continue;
+                    }
+
+                    if (text[index + 1] == '*')
+                    {
+                        index = SkipBlockComment(text, index + 2);
+                        continue;
+                    }
+                }
+
+                builder.Append(text[index]);
+                index++;
+            }
+
+            return builder.ToString();
+        }
+
+        private static int ReadWordToken(string text, int startIndex)
+        {
+            if (startIndex < 0 || startIndex >= text.Length || !(text[startIndex] == '_' || char.IsLetter(text[startIndex])))
+            {
+                return startIndex;
+            }
+
+            int index = startIndex + 1;
+            while (index < text.Length && IsWordChar(text[index]))
+            {
+                index++;
+            }
+
+            return index;
         }
 
         private static string RemoveWhitespace(string value)
@@ -3537,11 +4228,11 @@ namespace InlineCppVarDbg
             {
                 return new EvaluationPolicy(
                     isEmergencyMode: false,
-                    previousLineCount: Math.Min(clampedPreviousLines, FastModeMaxPreviousLines),
+                    previousLineCount: clampedPreviousLines,
                     hardBudgetMs: DefaultHardBudgetMs,
                     perExpressionTimeoutMs: DefaultPerExpressionTimeoutMs,
                     allowGetterCalls: true,
-                    allowFallbackExpressions: false,
+                    allowFallbackExpressions: true,
                     allowDataMemberRecursion: false,
                     allowArrayProbing: false,
                     allowCharProbing: false);
@@ -3549,11 +4240,11 @@ namespace InlineCppVarDbg
 
             return new EvaluationPolicy(
                 isEmergencyMode: true,
-                previousLineCount: Math.Min(clampedPreviousLines, EmergencyModeMaxPreviousLines),
+                previousLineCount: clampedPreviousLines,
                 hardBudgetMs: EmergencyHardBudgetMs,
                 perExpressionTimeoutMs: EmergencyPerExpressionTimeoutMs,
                 allowGetterCalls: true,
-                allowFallbackExpressions: false,
+                allowFallbackExpressions: true,
                 allowDataMemberRecursion: false,
                 allowArrayProbing: false,
                 allowCharProbing: false);
@@ -4121,15 +4812,17 @@ namespace InlineCppVarDbg
 
         private readonly struct GetterCallToken
         {
-            public GetterCallToken(string expressionText, string displayLabel, int callEnd)
+            public GetterCallToken(string expressionText, string displayLabel, string methodName, int callEnd)
             {
                 ExpressionText = expressionText;
                 DisplayLabel = displayLabel;
+                MethodName = methodName;
                 CallEnd = callEnd;
             }
 
             public string ExpressionText { get; }
             public string DisplayLabel { get; }
+            public string MethodName { get; }
             public int CallEnd { get; }
         }
 
