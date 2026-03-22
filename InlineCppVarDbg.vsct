@@ -27,19 +27,28 @@
       <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleInlineValuesOn" priority="0x0100" type="Button">
         <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
         <CommandFlag>TextChanges</CommandFlag>
-        <Strings><ButtonText>ON/off</ButtonText></Strings>
+        <Strings>
+          <ButtonText>ON/off</ButtonText>
+          <ToolTipText>Toggle inline C++ values on or off.</ToolTipText>
+        </Strings>
       </Button>
 
       <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleValueDisplayModeIn" priority="0x0110" type="Button">
         <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
         <CommandFlag>TextChanges</CommandFlag>
-        <Strings><ButtonText>IN/end</ButtonText></Strings>
+        <Strings>
+          <ButtonText>IN/end</ButtonText>
+          <ToolTipText>Toggle value display between inline and end-of-line mode.</ToolTipText>
+        </Strings>
       </Button>
 
       <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleNumericDisplayModeHex" priority="0x0120" type="Button">
         <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
         <CommandFlag>TextChanges</CommandFlag>
-        <Strings><ButtonText>h/D/b</ButtonText></Strings>
+        <Strings>
+          <ButtonText>h/D/b</ButtonText>
+          <ToolTipText>Cycle numeric display mode between hex, decimal, and binary.</ToolTipText>
+        </Strings>
       </Button>
     </Buttons>
   </Commands>

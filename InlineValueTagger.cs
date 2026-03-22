@@ -253,6 +253,7 @@ namespace InlineCppVarDbg
             int endLineNumber = lineNumber;
             HashSet<string> parameterNames = GetStackFrameParameterNames(context.StackFrame);
             InlineValueNumericDisplayMode numericDisplayMode = settings.NumericDisplayMode;
+            InlineValueEvaluationKinds evaluationKinds = settings.EvaluationKinds;
 
             var tokensByLine = new List<LineTokens>();
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
@@ -271,12 +272,17 @@ namespace InlineCppVarDbg
                 var getterCalls = new List<GetterCallToken>();
                 foreach (CppCurrentLineTokenizer.IdentifierToken token in rawTokens)
                 {
-                    if (evaluationPolicy.AllowGetterCalls && TryParseGetterCall(lineText, token, out GetterCallToken getterCall))
+                    if (evaluationPolicy.AllowGetterCalls &&
+                        HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls) &&
+                        TryParseGetterCall(lineText, token, out GetterCallToken getterCall) &&
+                        TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall))
                     {
-                        getterCalls.Add(getterCall);
+                        getterCalls.Add(boundGetterCall);
                     }
 
-                    if (TryParseArrayIndexAccess(lineText, token, out GetterCallToken indexedCall))
+                    if (evaluationPolicy.AllowGetterCalls &&
+                        HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.IndexedExpressions) &&
+                        TryParseArrayIndexAccess(lineText, token, out GetterCallToken indexedCall))
                     {
                         getterCalls.Add(indexedCall);
                         continue;
@@ -317,9 +323,9 @@ namespace InlineCppVarDbg
                 currentPerfSession = perfSession;
                 try
                 {
-                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode);
-                    getterValueMap = evaluationPolicy.AllowGetterCalls
-                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode)
+                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds);
+                    getterValueMap = evaluationPolicy.AllowGetterCalls && allGetterCalls.Count > 0
+                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
                 }
                 finally
@@ -561,7 +567,8 @@ namespace InlineCppVarDbg
             StackFrame2 stackFrame,
             List<CppCurrentLineTokenizer.IdentifierToken> tokens,
             HashSet<string> extraRequiredIdentifiers,
-            InlineValueNumericDisplayMode numericDisplayMode)
+            InlineValueNumericDisplayMode numericDisplayMode,
+            InlineValueEvaluationKinds evaluationKinds)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -581,7 +588,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions locals = stackFrame.Locals2[true];
                 RecordPerf("StackFrame.Locals2", "Locals2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly);
+                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds);
             }
             catch (COMException)
             {
@@ -597,13 +604,15 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions arguments = stackFrame.Arguments2[true];
                 RecordPerf("StackFrame.Arguments2", "Arguments2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly);
+                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds);
             }
             catch (COMException)
             {
             }
 
-            if (!RuntimeAllowsFallbackExpressions() || ShouldAbortEvaluation())
+            if (!RuntimeAllowsFallbackExpressions() ||
+                !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.FallbackExpressions) ||
+                ShouldAbortEvaluation())
             {
                 return values;
             }
@@ -625,7 +634,7 @@ namespace InlineCppVarDbg
                     EnvDTE.Expression expression = TimedGetExpression(debugger, identifier, 50, "Fallback.GetExpression");
                     if (expression != null && expression.IsValidValue)
                     {
-                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly);
+                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds);
                     }
                 }
                 catch (COMException)
@@ -639,7 +648,8 @@ namespace InlineCppVarDbg
         private static Dictionary<string, string> ResolveGetterValues(
             Debugger debugger,
             List<GetterCallToken> getterCalls,
-            InlineValueNumericDisplayMode numericDisplayMode)
+            InlineValueNumericDisplayMode numericDisplayMode,
+            InlineValueEvaluationKinds evaluationKinds)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -661,9 +671,14 @@ namespace InlineCppVarDbg
                     continue;
                 }
 
+                if (!HasEvaluationKind(evaluationKinds, getterCall.EvaluationKind))
+                {
+                    continue;
+                }
+
                 try
                 {
-                    EnvDTE.Expression expression = TimedGetExpression(debugger, getterCall.ExpressionText, 50, "Getter.GetExpression");
+                    EnvDTE.Expression expression = TimedGetExpression(debugger, getterCall.EvaluationExpressionText, 50, "Getter.GetExpression");
                     if (expression == null || !expression.IsValidValue)
                     {
                         continue;
@@ -680,36 +695,21 @@ namespace InlineCppVarDbg
                         continue;
                     }
 
-                    ThreadHelper.ThrowIfNotOnUIThread();
-                    if (TryFormatUninitializedValue(expression.Type, expression.Value, normalized, out string uninitDisplay))
-                    {
-                        normalized = uninitDisplay;
-                    }
-                    else if (IsDisplayableEnumType(expression.Type, expression.Value, normalized))
-                    {
-                        if (!TryFormatEnumValue(debugger, getterCall.ExpressionText, expression.Type, expression.Value, normalized, EnumValueRenderMode.IntegerOnly, numericDisplayMode, out string enumDisplay))
-                        {
-                            continue;
-                        }
-
-                        normalized = enumDisplay;
-                    }
-                    else if (TryFormatNumericValue(numericDisplayMode, expression.Type, normalized, out string numericDisplay))
-                    {
-                        normalized = numericDisplay;
-                    }
-
-                    if (string.IsNullOrEmpty(normalized))
+                    if (!TryFormatEligibleValue(
+                        debugger,
+                        getterCall.EvaluationExpressionText,
+                        expression.Type,
+                        expression.Value,
+                        normalized,
+                        numericDisplayMode,
+                        EnumValueRenderMode.IntegerOnly,
+                        evaluationKinds,
+                        out string displayValue))
                     {
                         continue;
                     }
 
-                    if (ShouldSuppressValue(expression.Type, normalized))
-                    {
-                        continue;
-                    }
-
-                    values[getterCall.ExpressionText] = normalized;
+                    values[getterCall.ExpressionText] = displayValue;
                 }
                 catch (COMException)
                 {
@@ -726,7 +726,8 @@ namespace InlineCppVarDbg
             int depth,
             Debugger debugger,
             InlineValueNumericDisplayMode numericDisplayMode,
-            EnumValueRenderMode enumValueRenderMode)
+            EnumValueRenderMode enumValueRenderMode,
+            InlineValueEvaluationKinds evaluationKinds)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (expressions == null || depth > 4 || ShouldAbortEvaluation())
@@ -757,7 +758,7 @@ namespace InlineCppVarDbg
                     }
 
                     stopwatch.Restart();
-                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode);
+                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds);
                     RecordPerf("Expression.TryAddExpressionValue", expression.Name, stopwatch.ElapsedMilliseconds);
                 }
                 catch (COMException)
@@ -774,7 +775,7 @@ namespace InlineCppVarDbg
                     Stopwatch stopwatch = Stopwatch.StartNew();
                     Expressions dataMembers = expression.DataMembers;
                     RecordPerf("Expression.DataMembers", expression.Name, stopwatch.ElapsedMilliseconds);
-                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode);
+                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds);
                 }
                 catch (COMException)
                 {
@@ -790,7 +791,8 @@ namespace InlineCppVarDbg
             HashSet<string> requiredIdentifiers,
             Debugger debugger,
             InlineValueNumericDisplayMode numericDisplayMode,
-            EnumValueRenderMode enumValueRenderMode)
+            EnumValueRenderMode enumValueRenderMode,
+            InlineValueEvaluationKinds evaluationKinds)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (ShouldAbortEvaluation())
@@ -818,54 +820,21 @@ namespace InlineCppVarDbg
             }
 
             string evalExpressionName = needsExact ? name : simpleName;
-            if (TryFormatNullPointerValue(type, rawValue, normalized, out string nullDisplay))
-            {
-                normalized = nullDisplay;
-            }
-            else if (IsSuppressiblePointerType(type))
-            {
-                return;
-            }
-            else if (IsArrayType(type))
-            {
-                if (!TryFormatArrayValue(debugger, evalExpressionName, type, rawValue, normalized, numericDisplayMode, out string arrayDisplay))
-                {
-                    return;
-                }
-
-                normalized = arrayDisplay;
-            }
-            else if (TryFormatUninitializedValue(type, rawValue, normalized, out string uninitDisplay))
-            {
-                normalized = uninitDisplay;
-            }
-            else if (IsDisplayableEnumType(type, rawValue, normalized))
-            {
-                if (!TryFormatEnumValue(debugger, evalExpressionName, type, rawValue, normalized, EnumValueRenderMode.IntegerOnly, numericDisplayMode, out string enumDisplay))
-                {
-                    return;
-                }
-
-                normalized = enumDisplay;
-            }
-            else if (TryFormatNumericValue(numericDisplayMode, type, normalized, out string numericDisplay))
-            {
-                normalized = numericDisplay;
-            }
-            else if (!IsDisplayableScalarType(type) && !IsDisplayableEnumType(type, rawValue, normalized))
+            if (!TryFormatEligibleValue(
+                debugger,
+                evalExpressionName,
+                type,
+                rawValue,
+                normalized,
+                numericDisplayMode,
+                enumValueRenderMode,
+                evaluationKinds,
+                out string displayValue))
             {
                 return;
             }
 
-            if (string.IsNullOrEmpty(normalized))
-            {
-                return;
-            }
-
-            if (ShouldSuppressValue(type, normalized))
-            {
-                return;
-            }
+            normalized = displayValue;
 
             if (needsExact && !values.ContainsKey(name))
             {
@@ -1531,7 +1500,105 @@ namespace InlineCppVarDbg
             return candidate;
         }
 
-        private static bool ShouldSuppressValue(string type, string normalizedValue)
+        private static bool TryFormatEligibleValue(
+            Debugger debugger,
+            string evalExpressionName,
+            string type,
+            string rawValue,
+            string normalizedValue,
+            InlineValueNumericDisplayMode numericDisplayMode,
+            EnumValueRenderMode enumValueRenderMode,
+            InlineValueEvaluationKinds evaluationKinds,
+            out string displayValue)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            displayValue = normalizedValue;
+            if (string.IsNullOrEmpty(normalizedValue))
+            {
+                return false;
+            }
+
+            if (TryFormatNullPointerValue(type, rawValue, normalizedValue, out string nullDisplay))
+            {
+                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers))
+                {
+                    return false;
+                }
+
+                displayValue = nullDisplay;
+            }
+            else if (IsSuppressiblePointerType(type))
+            {
+                return false;
+            }
+            else if (IsArrayType(type))
+            {
+                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays))
+                {
+                    return false;
+                }
+
+                if (!TryFormatArrayValue(debugger, evalExpressionName, type, rawValue, normalizedValue, numericDisplayMode, out string arrayDisplay))
+                {
+                    return false;
+                }
+
+                displayValue = arrayDisplay;
+            }
+            else if (TryFormatUninitializedValue(type, rawValue, normalizedValue, out string uninitializedDisplay))
+            {
+                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
+                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                {
+                    return false;
+                }
+
+                displayValue = uninitializedDisplay;
+            }
+            else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
+            {
+                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums))
+                {
+                    return false;
+                }
+
+                if (!TryFormatEnumValue(debugger, evalExpressionName, type, rawValue, normalizedValue, enumValueRenderMode, numericDisplayMode, out string enumDisplay))
+                {
+                    return false;
+                }
+
+                displayValue = enumDisplay;
+            }
+            else if (TryFormatNumericValue(numericDisplayMode, type, normalizedValue, out string numericDisplay))
+            {
+                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                {
+                    return false;
+                }
+
+                displayValue = numericDisplay;
+            }
+            else if (IsDisplayableScalarType(type))
+            {
+                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(displayValue))
+            {
+                return false;
+            }
+
+            return !ShouldSuppressValue(type, displayValue, evaluationKinds);
+        }
+
+        private static bool ShouldSuppressValue(string type, string normalizedValue, InlineValueEvaluationKinds evaluationKinds)
         {
             if (string.IsNullOrWhiteSpace(type) || string.IsNullOrEmpty(normalizedValue))
             {
@@ -1540,7 +1607,13 @@ namespace InlineCppVarDbg
 
             if (normalizedValue.StartsWith(NullValueMarker, StringComparison.Ordinal))
             {
-                return false;
+                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers);
+            }
+
+            if (normalizedValue.StartsWith(UninitializedValueMarker, StringComparison.Ordinal))
+            {
+                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
+                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
             }
 
             if (IsSuppressiblePointerType(type))
@@ -1550,17 +1623,17 @@ namespace InlineCppVarDbg
 
             if (IsArrayType(type))
             {
-                return false;
+                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays);
             }
 
             if (IsDisplayableEnumType(type, null, normalizedValue))
             {
-                return false;
+                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums);
             }
 
             if (IsDisplayableScalarType(type))
             {
-                return false;
+                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
             }
 
             return true;
@@ -3479,7 +3552,13 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            getterCall = new GetterCallToken(expressionText, expressionText, token.Name, closeParenIndex + 1);
+            getterCall = new GetterCallToken(
+                expressionText,
+                expressionText,
+                expressionText,
+                token.Name,
+                closeParenIndex + 1,
+                InlineValueEvaluationKinds.GetterCalls);
             return true;
         }
 
@@ -3519,7 +3598,13 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            indexedCall = new GetterCallToken(expressionText, expressionText, token.Name, closeBracketIndex + 1);
+            indexedCall = new GetterCallToken(
+                expressionText,
+                expressionText,
+                expressionText,
+                token.Name,
+                closeBracketIndex + 1,
+                InlineValueEvaluationKinds.IndexedExpressions);
             return true;
         }
 
@@ -3718,8 +3803,26 @@ namespace InlineCppVarDbg
                    methodName.StartsWith("is", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool HasVisibleDirectReturnGetter(ITextSnapshot snapshot, string methodName)
+        private static bool TryBindVisibleDirectReturnGetter(ITextSnapshot snapshot, GetterCallToken getterCall, out GetterCallToken boundGetterCall)
         {
+            boundGetterCall = getterCall;
+            if (!TryGetVisibleDirectReturnGetterExpression(snapshot, getterCall.MethodName, out string returnExpression))
+            {
+                return false;
+            }
+
+            if (!TryBuildGetterEvaluationExpression(getterCall.ExpressionText, getterCall.MethodName, returnExpression, out string evaluationExpressionText))
+            {
+                return false;
+            }
+
+            boundGetterCall = getterCall.WithEvaluationExpression(evaluationExpressionText);
+            return true;
+        }
+
+        private static bool TryGetVisibleDirectReturnGetterExpression(ITextSnapshot snapshot, string methodName, out string returnExpression)
+        {
+            returnExpression = null;
             if (snapshot == null || !IsValidIdentifier(methodName))
             {
                 return false;
@@ -3761,7 +3864,7 @@ namespace InlineCppVarDbg
                 }
 
                 string argumentsText = text.Substring(openParenIndex + 1, closeParenIndex - openParenIndex - 1);
-                if (!string.IsNullOrWhiteSpace(argumentsText))
+                if (!IsZeroArgumentSignature(argumentsText))
                 {
                     continue;
                 }
@@ -3778,7 +3881,7 @@ namespace InlineCppVarDbg
                 }
 
                 string body = text.Substring(bodyStart + 1, closeBraceIndex - bodyStart - 1);
-                if (IsDirectReturnGetterBody(body))
+                if (TryExtractDirectReturnGetterExpression(body, out returnExpression))
                 {
                     return true;
                 }
@@ -3787,6 +3890,88 @@ namespace InlineCppVarDbg
             }
 
             return false;
+        }
+
+        private static bool IsZeroArgumentSignature(string argumentsText)
+        {
+            if (string.IsNullOrWhiteSpace(argumentsText))
+            {
+                return true;
+            }
+
+            string compact = RemoveWhitespace(StripComments(argumentsText));
+            return string.Equals(compact, "void", StringComparison.Ordinal);
+        }
+
+        private static bool TryBuildGetterEvaluationExpression(string getterExpression, string methodName, string returnExpression, out string evaluationExpression)
+        {
+            evaluationExpression = null;
+            if (string.IsNullOrWhiteSpace(getterExpression) || string.IsNullOrWhiteSpace(returnExpression) || string.IsNullOrWhiteSpace(methodName))
+            {
+                return false;
+            }
+
+            string compactReturnExpression = RemoveWhitespace(returnExpression.Trim());
+            if (string.IsNullOrEmpty(compactReturnExpression))
+            {
+                return false;
+            }
+
+            int callSuffixIndex = getterExpression.LastIndexOf(methodName + "()", StringComparison.Ordinal);
+            if (callSuffixIndex < 0)
+            {
+                return false;
+            }
+
+            int methodStart = callSuffixIndex;
+            if (methodStart >= 2 && getterExpression[methodStart - 1] == '>' && getterExpression[methodStart - 2] == '-')
+            {
+                string receiver = getterExpression.Substring(0, methodStart - 2);
+                evaluationExpression = BuildGetterReturnExpression(receiver, "->", compactReturnExpression);
+                return !string.IsNullOrEmpty(evaluationExpression);
+            }
+
+            if (methodStart >= 1 && getterExpression[methodStart - 1] == '.')
+            {
+                string receiver = getterExpression.Substring(0, methodStart - 1);
+                evaluationExpression = BuildGetterReturnExpression(receiver, ".", compactReturnExpression);
+                return !string.IsNullOrEmpty(evaluationExpression);
+            }
+
+            evaluationExpression = compactReturnExpression;
+            return true;
+        }
+
+        private static string BuildGetterReturnExpression(string receiver, string receiverOperator, string returnExpression)
+        {
+            if (string.IsNullOrWhiteSpace(returnExpression))
+            {
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(receiver))
+            {
+                return returnExpression;
+            }
+
+            if (returnExpression.StartsWith("this->", StringComparison.Ordinal))
+            {
+                string memberSuffix = returnExpression.Substring("this->".Length);
+                return string.IsNullOrEmpty(memberSuffix) ? null : receiver + receiverOperator + memberSuffix;
+            }
+
+            if (returnExpression.StartsWith("this.", StringComparison.Ordinal))
+            {
+                string memberSuffix = returnExpression.Substring("this.".Length);
+                return string.IsNullOrEmpty(memberSuffix) ? null : receiver + receiverOperator + memberSuffix;
+            }
+
+            if (returnExpression.StartsWith("::", StringComparison.Ordinal) || returnExpression.Contains("::"))
+            {
+                return returnExpression;
+            }
+
+            return receiver + receiverOperator + returnExpression;
         }
 
         private static bool TryFindMatchingBracket(string lineText, int openBracketIndex, out int closeBracketIndex)
@@ -3949,8 +4134,9 @@ namespace InlineCppVarDbg
             return false;
         }
 
-        private static bool IsDirectReturnGetterBody(string bodyText)
+        private static bool TryExtractDirectReturnGetterExpression(string bodyText, out string returnExpression)
         {
+            returnExpression = null;
             if (string.IsNullOrWhiteSpace(bodyText))
             {
                 return false;
@@ -3984,7 +4170,13 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            return IsDirectMemberExpression(expression);
+            if (!IsDirectMemberExpression(expression))
+            {
+                return false;
+            }
+
+            returnExpression = expression;
+            return true;
         }
 
         private static bool IsDirectMemberExpression(string expression)
@@ -4283,6 +4475,11 @@ namespace InlineCppVarDbg
         {
             PerfSession session = currentPerfSession;
             return session == null || session.Policy.AllowCharProbing;
+        }
+
+        private static bool HasEvaluationKind(InlineValueEvaluationKinds evaluationKinds, InlineValueEvaluationKinds requiredKind)
+        {
+            return (evaluationKinds & requiredKind) == requiredKind;
         }
 
         private static EnvDTE.Expression TimedGetExpression(Debugger debugger, string expressionText, int timeout, string phase)
@@ -4812,18 +5009,39 @@ namespace InlineCppVarDbg
 
         private readonly struct GetterCallToken
         {
-            public GetterCallToken(string expressionText, string displayLabel, string methodName, int callEnd)
+            public GetterCallToken(
+                string expressionText,
+                string evaluationExpressionText,
+                string displayLabel,
+                string methodName,
+                int callEnd,
+                InlineValueEvaluationKinds evaluationKind)
             {
                 ExpressionText = expressionText;
+                EvaluationExpressionText = evaluationExpressionText;
                 DisplayLabel = displayLabel;
                 MethodName = methodName;
                 CallEnd = callEnd;
+                EvaluationKind = evaluationKind;
             }
 
             public string ExpressionText { get; }
+            public string EvaluationExpressionText { get; }
             public string DisplayLabel { get; }
             public string MethodName { get; }
             public int CallEnd { get; }
+            public InlineValueEvaluationKinds EvaluationKind { get; }
+
+            public GetterCallToken WithEvaluationExpression(string evaluationExpressionText)
+            {
+                return new GetterCallToken(
+                    ExpressionText,
+                    evaluationExpressionText,
+                    DisplayLabel,
+                    MethodName,
+                    CallEnd,
+                    EvaluationKind);
+            }
         }
 
         private enum ValueDisplayKind

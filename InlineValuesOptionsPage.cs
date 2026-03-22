@@ -20,6 +20,7 @@ namespace InlineCppVarDbg
         private Color uninitializedValueBackgroundColor = ParseHexColor(DefaultUninitializedValueBackgroundColor, DefaultUninitializedValueBackgroundColor);
         private Color valueChangedAccentColor = ParseHexColor(DefaultValueChangedAccentColor, DefaultValueChangedAccentColor);
         private int valueChipFontSize = DefaultValueChipFontSize;
+        private InlineValueEvaluationKinds evaluationKinds = InlineValueEvaluationKinds.All;
 
         [Category("General")]
         [DisplayName("Previous line count")]
@@ -78,6 +79,78 @@ namespace InlineCppVarDbg
             set => valueChipFontSize = value;
         }
 
+        [Category("Evaluation")]
+        [DisplayName("Basic scalar values")]
+        [Description("Evaluate and show basic scalar types such as bool, char, int, float, and double.")]
+        public bool EvaluateBasicScalars
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.BasicScalars);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.BasicScalars, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Enum values")]
+        [Description("Evaluate and show enum variables and enum entries as integers.")]
+        public bool EvaluateEnumValues
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.Enums);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.Enums, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Array values")]
+        [Description("Evaluate and show array values using their front entries only.")]
+        public bool EvaluateArrayValues
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.Arrays);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.Arrays, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Get/Is function calls")]
+        [Description("Evaluate zero-argument Get*() and Is*() calls when their return type is eligible.")]
+        public bool EvaluateGetterCalls
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.GetterCalls);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.GetterCalls, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Indexed expressions")]
+        [Description("Evaluate indexed expressions such as a[b] in addition to showing b itself.")]
+        public bool EvaluateIndexedExpressions
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.IndexedExpressions);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.IndexedExpressions, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Const/constexpr/macro fallback")]
+        [Description("Use fallback debugger expression evaluation for const values, constexprs, and macros when available.")]
+        public bool EvaluateFallbackExpressions
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.FallbackExpressions);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.FallbackExpressions, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Null pointers")]
+        [Description("Show null raw pointers as a null chip. Non-null pointers remain suppressed.")]
+        public bool ShowNullPointers
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.NullPointers);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.NullPointers, value);
+        }
+
+        [Category("Evaluation")]
+        [DisplayName("Uninitialized markers")]
+        [Description("Show Not Init chips when the debugger value looks uninitialized.")]
+        public bool ShowUninitializedValues
+        {
+            get => HasEvaluationKind(InlineValueEvaluationKinds.UninitializedValues);
+            set => SetEvaluationKind(InlineValueEvaluationKinds.UninitializedValues, value);
+        }
+
         protected override void OnActivate(CancelEventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -92,6 +165,7 @@ namespace InlineCppVarDbg
                 uninitializedValueBackgroundColor = ParseHexColor(settings.UninitializedValueBackgroundColor, DefaultUninitializedValueBackgroundColor);
                 valueChangedAccentColor = ParseHexColor(settings.ValueChangedAccentColor, DefaultValueChangedAccentColor);
                 valueChipFontSize = settings.ValueChipFontSize;
+                evaluationKinds = settings.EvaluationKinds;
             }
         }
 
@@ -109,6 +183,24 @@ namespace InlineCppVarDbg
                 settings.SetUninitializedValueBackgroundColor(ToHex(uninitializedValueBackgroundColor));
                 settings.SetValueChangedAccentColor(ToHex(valueChangedAccentColor));
                 settings.SetValueChipFontSize(valueChipFontSize);
+                settings.SetEvaluationKinds(evaluationKinds);
+            }
+        }
+
+        private bool HasEvaluationKind(InlineValueEvaluationKinds kind)
+        {
+            return (evaluationKinds & kind) == kind;
+        }
+
+        private void SetEvaluationKind(InlineValueEvaluationKinds kind, bool enabled)
+        {
+            if (enabled)
+            {
+                evaluationKinds |= kind;
+            }
+            else
+            {
+                evaluationKinds &= ~kind;
             }
         }
 

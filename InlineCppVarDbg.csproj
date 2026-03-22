@@ -48,6 +48,7 @@
   <ItemGroup>
     <Compile Include="CppCurrentLineTokenizer.cs" />
     <Compile Include="DebuggerBridge.cs" />
+    <Compile Include="InlineValueEvaluationKinds.cs" />
     <Compile Include="InlineValueDisplayMode.cs" />
     <Compile Include="InlineValueNumericDisplayMode.cs" />
     <Compile Include="InlineValueTagger.cs" />

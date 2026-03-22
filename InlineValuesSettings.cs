@@ -15,9 +15,11 @@ namespace InlineCppVarDbg
         public const string ValueChangedAccentColorPropertyName = "ValueChangedAccentColor";
         public const string ValueChipFontSizePropertyName = "ValueChipFontSize";
         public const string NumericDisplayModePropertyName = "NumericDisplayMode";
+        public const string EvaluationKindsPropertyName = "EvaluationKinds";
         private const int DefaultPreviousLineCount = 20;
         private const InlineValueDisplayMode DefaultDisplayMode = InlineValueDisplayMode.Inline;
         private const InlineValueNumericDisplayMode DefaultNumericDisplayMode = InlineValueNumericDisplayMode.Decimal;
+        private const InlineValueEvaluationKinds DefaultEvaluationKinds = InlineValueEvaluationKinds.All;
         private const int MaxPreviousLineCount = 200;
         private const string DefaultValueBackgroundColor = "#E5E5E5";
         private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
@@ -37,6 +39,7 @@ namespace InlineCppVarDbg
         private string valueChangedAccentColor;
         private int valueChipFontSize;
         private InlineValueNumericDisplayMode numericDisplayMode;
+        private InlineValueEvaluationKinds evaluationKinds;
 
         public event EventHandler SettingsChanged;
 
@@ -58,6 +61,7 @@ namespace InlineCppVarDbg
             valueChangedAccentColor = ReadValueChangedAccentColorOrDefault();
             valueChipFontSize = ReadValueChipFontSizeOrDefault();
             numericDisplayMode = ReadNumericDisplayModeOrDefault();
+            evaluationKinds = ReadEvaluationKindsOrDefault();
         }
 
         public bool IsEnabled
@@ -144,6 +148,17 @@ namespace InlineCppVarDbg
                 lock (gate)
                 {
                     return numericDisplayMode;
+                }
+            }
+        }
+
+        public InlineValueEvaluationKinds EvaluationKinds
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return evaluationKinds;
                 }
             }
         }
@@ -331,6 +346,29 @@ namespace InlineCppVarDbg
             }
         }
 
+        public void SetEvaluationKinds(InlineValueEvaluationKinds kinds)
+        {
+            InlineValueEvaluationKinds normalized = NormalizeEvaluationKinds(kinds);
+            bool changed;
+
+            lock (gate)
+            {
+                if (evaluationKinds == normalized)
+                {
+                    return;
+                }
+
+                evaluationKinds = normalized;
+                PersistEvaluationKinds(normalized);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                SettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
         private bool ReadEnabledOrDefault()
         {
             if (store.PropertyExists(CollectionPath, EnabledPropertyName))
@@ -482,6 +520,24 @@ namespace InlineCppVarDbg
             return DefaultNumericDisplayMode;
         }
 
+        private InlineValueEvaluationKinds ReadEvaluationKindsOrDefault()
+        {
+            if (store.PropertyExists(CollectionPath, EvaluationKindsPropertyName))
+            {
+                try
+                {
+                    return NormalizeEvaluationKinds((InlineValueEvaluationKinds)store.GetInt32(CollectionPath, EvaluationKindsPropertyName));
+                }
+                catch
+                {
+                    return DefaultEvaluationKinds;
+                }
+            }
+
+            PersistEvaluationKinds(DefaultEvaluationKinds);
+            return DefaultEvaluationKinds;
+        }
+
         private void PersistEnabled(bool value)
         {
             store.SetBoolean(CollectionPath, EnabledPropertyName, value);
@@ -520,6 +576,11 @@ namespace InlineCppVarDbg
         private void PersistNumericDisplayMode(InlineValueNumericDisplayMode mode)
         {
             store.SetInt32(CollectionPath, NumericDisplayModePropertyName, (int)NormalizeNumericDisplayMode(mode));
+        }
+
+        private void PersistEvaluationKinds(InlineValueEvaluationKinds kinds)
+        {
+            store.SetInt32(CollectionPath, EvaluationKindsPropertyName, (int)NormalizeEvaluationKinds(kinds));
         }
 
         private static int ClampPreviousLineCount(int value)
@@ -572,6 +633,11 @@ namespace InlineCppVarDbg
             }
 
             return mode;
+        }
+
+        private static InlineValueEvaluationKinds NormalizeEvaluationKinds(InlineValueEvaluationKinds kinds)
+        {
+            return kinds & InlineValueEvaluationKinds.All;
         }
 
         private static string NormalizeColorOrDefault(string value)
