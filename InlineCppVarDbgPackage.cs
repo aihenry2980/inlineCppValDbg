@@ -21,6 +21,8 @@ namespace InlineCppVarDbg
             await ToggleInlineValuesCommand.InitializeAsync(this);
             await ToggleValueDisplayModeCommand.InitializeAsync(this);
             await ToggleNumericDisplayModeCommand.InitializeAsync(this);
+            await EvaluateGetterValuesInFunctionCommand.InitializeAsync(this);
+            await EvaluateAllValuesInFunctionCommand.InitializeAsync(this);
         }
     }
 }

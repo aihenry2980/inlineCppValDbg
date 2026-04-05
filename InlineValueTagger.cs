@@ -14,6 +14,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Stopwatch = System.Diagnostics.Stopwatch;
 
@@ -89,6 +90,7 @@ namespace InlineCppVarDbg
         private int lastComparedDebuggerVersion = -1;
         private Dictionary<string, string> lastResolvedValues = new Dictionary<string, string>(StringComparer.Ordinal);
         private Dictionary<string, int> lastHighlightLevels = new Dictionary<string, int>(StringComparer.Ordinal);
+        private readonly HashSet<string> manualGetterRequests = new HashSet<string>(StringComparer.Ordinal);
         private int policyVersion = -1;
         private int emergencyModeStepsRemaining;
         [ThreadStatic]
@@ -112,6 +114,7 @@ namespace InlineCppVarDbg
 
             textBuffer.Changed += OnBufferChanged;
             textView.Closed += OnTextViewClosed;
+            textView.VisualElement.PreviewMouseLeftButtonDown += OnPreviewMouseLeftButtonDown;
             debuggerBridge.DebugStateChanged += OnDebugStateChanged;
             settings.SettingsChanged += OnSettingsChanged;
             UpdateAppearanceSettings();
@@ -245,46 +248,77 @@ namespace InlineCppVarDbg
             }
 
             AdvanceEvaluationPolicy(debuggerBridge.Version);
-            EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount);
+            bool manualVariableFunctionSweep = debuggerBridge.IsManualVariableFunctionSweepRequested;
+            EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount, manualVariableFunctionSweep);
             int functionStartLineNumber = FindEnclosingFunctionStartLine(snapshot, lineNumber);
+            bool manualGetterFunctionSweep = debuggerBridge.IsManualGetterFunctionSweepRequested;
+            int functionEndLineNumber = functionStartLineNumber >= 0
+                ? FindEnclosingFunctionEndLine(snapshot, functionStartLineNumber)
+                : lineNumber;
             int previousLineCount = evaluationPolicy.PreviousLineCount;
             int functionScopeStartLine = functionStartLineNumber >= 0 ? functionStartLineNumber : 0;
-            int startLineNumber = Math.Max(functionScopeStartLine, lineNumber - previousLineCount);
-            int endLineNumber = lineNumber;
+            int regularStartLineNumber = manualVariableFunctionSweep
+                ? functionScopeStartLine
+                : Math.Max(functionScopeStartLine, lineNumber - previousLineCount);
+            int regularEndLineNumber = manualVariableFunctionSweep
+                ? Math.Max(lineNumber, functionEndLineNumber)
+                : lineNumber;
+            int getterStartLineNumber = manualGetterFunctionSweep ? functionScopeStartLine : regularStartLineNumber;
+            int getterEndLineNumber = manualGetterFunctionSweep ? Math.Max(lineNumber, functionEndLineNumber) : regularEndLineNumber;
+            int coveredStartLineNumber = Math.Min(regularStartLineNumber, getterStartLineNumber);
+            int coveredEndLineNumber = Math.Max(regularEndLineNumber, getterEndLineNumber);
             HashSet<string> parameterNames = GetStackFrameParameterNames(context.StackFrame);
             InlineValueNumericDisplayMode numericDisplayMode = settings.NumericDisplayMode;
             InlineValueEvaluationKinds evaluationKinds = settings.EvaluationKinds;
+            InlineValueRuleKinds ruleKinds = settings.RuleKinds;
+            IReadOnlyList<InlineValueCustomRule> customRules = settings.CustomRules;
 
             var tokensByLine = new List<LineTokens>();
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
             var allGetterCalls = new List<GetterCallToken>();
-            for (int lineIndex = startLineNumber; lineIndex <= endLineNumber; lineIndex++)
+            for (int lineIndex = coveredStartLineNumber; lineIndex <= coveredEndLineNumber; lineIndex++)
             {
                 ITextSnapshotLine line = snapshot.GetLineFromLineNumber(lineIndex);
-                if (IsInactivePreprocessorLine(line))
+                if (!HasRuleKind(ruleKinds, InlineValueRuleKinds.ParseInactivePreprocessor) && IsInactivePreprocessorLine(line))
                 {
                     continue;
                 }
 
                 string lineText = line.GetText();
-                List<CppCurrentLineTokenizer.IdentifierToken> rawTokens = CppCurrentLineTokenizer.TokenizeIdentifiers(lineText);
-                var tokens = new List<CppCurrentLineTokenizer.IdentifierToken>(rawTokens.Count);
+                bool scanRegularTokens = lineIndex >= regularStartLineNumber && lineIndex <= regularEndLineNumber;
+                bool scanGetterTokens = lineIndex >= getterStartLineNumber && lineIndex <= getterEndLineNumber;
+                List<CppCurrentLineTokenizer.IdentifierToken> rawTokens =
+                    (scanRegularTokens || scanGetterTokens)
+                    ? CppCurrentLineTokenizer.TokenizeIdentifiers(lineText)
+                    : new List<CppCurrentLineTokenizer.IdentifierToken>();
+                var tokens = new List<CppCurrentLineTokenizer.IdentifierToken>(scanRegularTokens ? rawTokens.Count : 0);
                 var getterCalls = new List<GetterCallToken>();
                 foreach (CppCurrentLineTokenizer.IdentifierToken token in rawTokens)
                 {
-                    if (evaluationPolicy.AllowGetterCalls &&
-                        HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls) &&
+                    if (scanGetterTokens &&
+                        evaluationPolicy.AllowGetterCalls &&
                         TryParseGetterCall(lineText, token, out GetterCallToken getterCall) &&
                         TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall))
                     {
-                        getterCalls.Add(boundGetterCall);
+                        bool allowAutomaticGetter = HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls);
+                        bool allowManualGetter = manualGetterFunctionSweep || manualGetterRequests.Contains(boundGetterCall.ExpressionText);
+                        if (allowAutomaticGetter || allowManualGetter)
+                        {
+                            getterCalls.Add(boundGetterCall);
+                        }
                     }
 
-                    if (evaluationPolicy.AllowGetterCalls &&
+                    if (scanRegularTokens &&
+                        evaluationPolicy.AllowGetterCalls &&
                         HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.IndexedExpressions) &&
                         TryParseArrayIndexAccess(lineText, token, out GetterCallToken indexedCall))
                     {
                         getterCalls.Add(indexedCall);
+                        continue;
+                    }
+
+                    if (!scanRegularTokens)
+                    {
                         continue;
                     }
 
@@ -308,8 +342,8 @@ namespace InlineCppVarDbg
 
             if (allTokens.Count == 0 && allGetterCalls.Count == 0 && parameterNames.Count == 0)
             {
-                ITextSnapshotLine startLine = snapshot.GetLineFromLineNumber(startLineNumber);
-                ITextSnapshotLine endLine = snapshot.GetLineFromLineNumber(endLineNumber);
+                ITextSnapshotLine startLine = snapshot.GetLineFromLineNumber(coveredStartLineNumber);
+                ITextSnapshotLine endLine = snapshot.GetLineFromLineNumber(coveredEndLineNumber);
                 int spanStart = startLine.Start.Position;
                 int spanEnd = endLine.End.Position;
                 return new ComputedTagData(new SnapshotSpan(snapshot, Span.FromBounds(spanStart, spanEnd)), new List<TagEntry>());
@@ -323,9 +357,9 @@ namespace InlineCppVarDbg
                 currentPerfSession = perfSession;
                 try
                 {
-                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds);
+                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds, ruleKinds, customRules);
                     getterValueMap = evaluationPolicy.AllowGetterCalls && allGetterCalls.Count > 0
-                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds)
+                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, customRules)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
                 }
                 finally
@@ -452,15 +486,19 @@ namespace InlineCppVarDbg
                 }
             }
 
-            int parameterAnchorStartLine = AddMissingParameterAnchorTags(
-                snapshot,
-                functionStartLineNumber,
-                parameterNames,
-                valueMap,
-                highlightLevels,
-                displayMode,
-                firstEntryByIdentifier,
-                latestEntryByIdentifier);
+            int parameterAnchorStartLine = int.MaxValue;
+            if (HasRuleKind(ruleKinds, InlineValueRuleKinds.ParameterAnchors))
+            {
+                parameterAnchorStartLine = AddMissingParameterAnchorTags(
+                    snapshot,
+                    functionStartLineNumber,
+                    parameterNames,
+                    valueMap,
+                    highlightLevels,
+                    displayMode,
+                    firstEntryByIdentifier,
+                    latestEntryByIdentifier);
+            }
 
             var tagEntries = new List<TagEntry>(latestEntryByIdentifier.Count * 2);
             foreach (KeyValuePair<string, TagEntry> pair in latestEntryByIdentifier)
@@ -474,10 +512,10 @@ namespace InlineCppVarDbg
                 }
             }
 
-            int coveredStartLineNumber = startLineNumber;
+            int finalCoveredStartLineNumber = coveredStartLineNumber;
             if (parameterAnchorStartLine != int.MaxValue)
             {
-                coveredStartLineNumber = Math.Min(coveredStartLineNumber, parameterAnchorStartLine);
+                finalCoveredStartLineNumber = Math.Min(finalCoveredStartLineNumber, parameterAnchorStartLine);
             }
 
             tagEntries = tagEntries
@@ -485,8 +523,8 @@ namespace InlineCppVarDbg
                 .ThenBy(t => t.Affinity == PositionAffinity.Successor ? 1 : 0)
                 .ToList();
 
-            ITextSnapshotLine rangeStartLine = snapshot.GetLineFromLineNumber(coveredStartLineNumber);
-            ITextSnapshotLine rangeEndLine = snapshot.GetLineFromLineNumber(endLineNumber);
+            ITextSnapshotLine rangeStartLine = snapshot.GetLineFromLineNumber(finalCoveredStartLineNumber);
+            ITextSnapshotLine rangeEndLine = snapshot.GetLineFromLineNumber(coveredEndLineNumber);
             int rangeStart = rangeStartLine.Start.Position;
             int rangeEnd = rangeEndLine.End.Position;
 
@@ -568,7 +606,9 @@ namespace InlineCppVarDbg
             List<CppCurrentLineTokenizer.IdentifierToken> tokens,
             HashSet<string> extraRequiredIdentifiers,
             InlineValueNumericDisplayMode numericDisplayMode,
-            InlineValueEvaluationKinds evaluationKinds)
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -588,7 +628,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions locals = stackFrame.Locals2[true];
                 RecordPerf("StackFrame.Locals2", "Locals2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds);
+                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, customRules);
             }
             catch (COMException)
             {
@@ -604,7 +644,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions arguments = stackFrame.Arguments2[true];
                 RecordPerf("StackFrame.Arguments2", "Arguments2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds);
+                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, customRules);
             }
             catch (COMException)
             {
@@ -634,7 +674,7 @@ namespace InlineCppVarDbg
                     EnvDTE.Expression expression = TimedGetExpression(debugger, identifier, 50, "Fallback.GetExpression");
                     if (expression != null && expression.IsValidValue)
                     {
-                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds);
+                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, customRules);
                     }
                 }
                 catch (COMException)
@@ -649,7 +689,9 @@ namespace InlineCppVarDbg
             Debugger debugger,
             List<GetterCallToken> getterCalls,
             InlineValueNumericDisplayMode numericDisplayMode,
-            InlineValueEvaluationKinds evaluationKinds)
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -704,6 +746,8 @@ namespace InlineCppVarDbg
                         numericDisplayMode,
                         EnumValueRenderMode.IntegerOnly,
                         evaluationKinds,
+                        ruleKinds,
+                        customRules,
                         out string displayValue))
                     {
                         continue;
@@ -727,7 +771,9 @@ namespace InlineCppVarDbg
             Debugger debugger,
             InlineValueNumericDisplayMode numericDisplayMode,
             EnumValueRenderMode enumValueRenderMode,
-            InlineValueEvaluationKinds evaluationKinds)
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (expressions == null || depth > 4 || ShouldAbortEvaluation())
@@ -758,7 +804,7 @@ namespace InlineCppVarDbg
                     }
 
                     stopwatch.Restart();
-                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds);
+                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, customRules);
                     RecordPerf("Expression.TryAddExpressionValue", expression.Name, stopwatch.ElapsedMilliseconds);
                 }
                 catch (COMException)
@@ -775,7 +821,7 @@ namespace InlineCppVarDbg
                     Stopwatch stopwatch = Stopwatch.StartNew();
                     Expressions dataMembers = expression.DataMembers;
                     RecordPerf("Expression.DataMembers", expression.Name, stopwatch.ElapsedMilliseconds);
-                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds);
+                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, customRules);
                 }
                 catch (COMException)
                 {
@@ -792,7 +838,9 @@ namespace InlineCppVarDbg
             Debugger debugger,
             InlineValueNumericDisplayMode numericDisplayMode,
             EnumValueRenderMode enumValueRenderMode,
-            InlineValueEvaluationKinds evaluationKinds)
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (ShouldAbortEvaluation())
@@ -829,6 +877,8 @@ namespace InlineCppVarDbg
                 numericDisplayMode,
                 enumValueRenderMode,
                 evaluationKinds,
+                ruleKinds,
+                customRules,
                 out string displayValue))
             {
                 return;
@@ -1509,6 +1559,8 @@ namespace InlineCppVarDbg
             InlineValueNumericDisplayMode numericDisplayMode,
             EnumValueRenderMode enumValueRenderMode,
             InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules,
             out string displayValue)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -1518,14 +1570,36 @@ namespace InlineCppVarDbg
                 return false;
             }
 
+            CustomRuleDecision customRuleDecision = GetCustomRuleDecision(customRules, type, evalExpressionName);
+            if (customRuleDecision == CustomRuleDecision.Hide)
+            {
+                return false;
+            }
+
+            bool forceShow = customRuleDecision == CustomRuleDecision.Show;
+
             if (TryFormatNullPointerValue(type, rawValue, normalizedValue, out string nullDisplay))
             {
-                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers))
+                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers))
                 {
                     return false;
                 }
 
                 displayValue = nullDisplay;
+            }
+            else if (TryFormatIntegralPointerValue(
+                debugger,
+                evalExpressionName,
+                type,
+                rawValue,
+                normalizedValue,
+                numericDisplayMode,
+                evaluationKinds,
+                ruleKinds,
+                forceShow,
+                out string integralPointerDisplay))
+            {
+                displayValue = integralPointerDisplay;
             }
             else if (IsSuppressiblePointerType(type))
             {
@@ -1533,7 +1607,7 @@ namespace InlineCppVarDbg
             }
             else if (IsArrayType(type))
             {
-                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays))
+                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays))
                 {
                     return false;
                 }
@@ -1547,8 +1621,9 @@ namespace InlineCppVarDbg
             }
             else if (TryFormatUninitializedValue(type, rawValue, normalizedValue, out string uninitializedDisplay))
             {
-                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
-                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
+                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars)))
                 {
                     return false;
                 }
@@ -1557,7 +1632,7 @@ namespace InlineCppVarDbg
             }
             else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
             {
-                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums))
+                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums))
                 {
                     return false;
                 }
@@ -1571,7 +1646,7 @@ namespace InlineCppVarDbg
             }
             else if (TryFormatNumericValue(numericDisplayMode, type, normalizedValue, out string numericDisplay))
             {
-                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
                 {
                     return false;
                 }
@@ -1580,7 +1655,7 @@ namespace InlineCppVarDbg
             }
             else if (IsDisplayableScalarType(type))
             {
-                if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
                 {
                     return false;
                 }
@@ -1595,10 +1670,15 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            return !ShouldSuppressValue(type, displayValue, evaluationKinds);
+            return !ShouldSuppressValue(type, displayValue, evaluationKinds, ruleKinds, forceShow);
         }
 
-        private static bool ShouldSuppressValue(string type, string normalizedValue, InlineValueEvaluationKinds evaluationKinds)
+        private static bool ShouldSuppressValue(
+            string type,
+            string normalizedValue,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            bool forceShow)
         {
             if (string.IsNullOrWhiteSpace(type) || string.IsNullOrEmpty(normalizedValue))
             {
@@ -1607,13 +1687,18 @@ namespace InlineCppVarDbg
 
             if (normalizedValue.StartsWith(NullValueMarker, StringComparison.Ordinal))
             {
-                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers);
+                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers);
             }
 
             if (normalizedValue.StartsWith(UninitializedValueMarker, StringComparison.Ordinal))
             {
-                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
-                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
+                return !forceShow && (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
+                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars));
+            }
+
+            if (IsDisplayableIntegralPointerType(type))
+            {
+                return !forceShow && !HasRuleKind(ruleKinds, InlineValueRuleKinds.IntegralPointers);
             }
 
             if (IsSuppressiblePointerType(type))
@@ -1623,17 +1708,17 @@ namespace InlineCppVarDbg
 
             if (IsArrayType(type))
             {
-                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays);
+                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays);
             }
 
             if (IsDisplayableEnumType(type, null, normalizedValue))
             {
-                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums);
+                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums);
             }
 
             if (IsDisplayableScalarType(type))
             {
-                return !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
+                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
             }
 
             return true;
@@ -1654,6 +1739,55 @@ namespace InlineCppVarDbg
             return !string.IsNullOrWhiteSpace(type) && type.IndexOf('*') >= 0;
         }
 
+        private static string ExtractPointerElementType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return string.Empty;
+            }
+
+            int pointerIndex = type.IndexOf('*');
+            if (pointerIndex <= 0)
+            {
+                return string.Empty;
+            }
+
+            return type.Substring(0, pointerIndex).Trim();
+        }
+
+        private static bool IsDisplayableIntegralPointerType(string type)
+        {
+            if (!IsPointerType(type) || IsFunctionPointerType(type))
+            {
+                return false;
+            }
+
+            string elementType = ExtractPointerElementType(type);
+            if (string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            string lower = elementType.ToLowerInvariant();
+            if (ContainsTypeWord(lower, "char") ||
+                ContainsTypeWord(lower, "wchar_t") ||
+                ContainsTypeWord(lower, "char8_t") ||
+                ContainsTypeWord(lower, "char16_t") ||
+                ContainsTypeWord(lower, "char32_t") ||
+                ContainsTypeWord(lower, "bool"))
+            {
+                return false;
+            }
+
+            return IsIntegralScalarType(elementType) ||
+                   ContainsTypeWord(lower, "uint") ||
+                   ContainsTypeWord(lower, "ushort") ||
+                   ContainsTypeWord(lower, "ulong") ||
+                   ContainsTypeWord(lower, "byte") ||
+                   ContainsTypeWord(lower, "word") ||
+                   ContainsTypeWord(lower, "dword");
+        }
+
         private static bool TryFormatNullPointerValue(string type, string rawValue, string normalizedValue, out string displayValue)
         {
             displayValue = normalizedValue;
@@ -1668,6 +1802,87 @@ namespace InlineCppVarDbg
             }
 
             displayValue = NullValueMarker + "null";
+            return true;
+        }
+
+        private static bool TryFormatIntegralPointerValue(
+            Debugger debugger,
+            string expressionName,
+            string type,
+            string rawValue,
+            string normalizedValue,
+            InlineValueNumericDisplayMode numericDisplayMode,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            bool forceShow,
+            out string displayValue)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            displayValue = normalizedValue;
+            if ((!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars)) ||
+                (!forceShow && !HasRuleKind(ruleKinds, InlineValueRuleKinds.IntegralPointers)) ||
+                !IsDisplayableIntegralPointerType(type) ||
+                string.IsNullOrWhiteSpace(expressionName) ||
+                debugger == null)
+            {
+                return false;
+            }
+
+            if (IsNullLikeValue(rawValue) || IsNullLikeValue(normalizedValue))
+            {
+                return false;
+            }
+
+            string pointerDisplay = ExtractLeadingToken(normalizedValue);
+            if (string.IsNullOrWhiteSpace(pointerDisplay) || !IsAddressLikeValue(pointerDisplay))
+            {
+                pointerDisplay = ExtractLeadingToken(rawValue);
+            }
+
+            if (string.IsNullOrWhiteSpace(pointerDisplay))
+            {
+                pointerDisplay = normalizedValue.Trim();
+            }
+
+            string dereferenceExpression = "*(" + expressionName + ")";
+            EnvDTE.Expression dereferencedExpression;
+            try
+            {
+                dereferencedExpression = TimedGetExpression(debugger, dereferenceExpression, 50, "Pointer.Deref.GetExpression");
+            }
+            catch (COMException)
+            {
+                return false;
+            }
+
+            if (dereferencedExpression == null || !dereferencedExpression.IsValidValue)
+            {
+                return false;
+            }
+
+            string normalizedDerefValue = NormalizeValue(dereferencedExpression.Value);
+            if (string.IsNullOrEmpty(normalizedDerefValue))
+            {
+                return false;
+            }
+
+            if (!TryFormatEligibleValue(
+                debugger,
+                dereferenceExpression,
+                dereferencedExpression.Type,
+                dereferencedExpression.Value,
+                normalizedDerefValue,
+                numericDisplayMode,
+                EnumValueRenderMode.IntegerOnly,
+                evaluationKinds,
+                ruleKinds,
+                null,
+                out string dereferencedDisplay))
+            {
+                return false;
+            }
+
+            displayValue = pointerDisplay + " (" + StripDisplayMarker(dereferencedDisplay) + ")";
             return true;
         }
 
@@ -3391,6 +3606,108 @@ namespace InlineCppVarDbg
             return -1;
         }
 
+        private static int FindEnclosingFunctionEndLine(ITextSnapshot snapshot, int functionStartLine)
+        {
+            if (snapshot == null || functionStartLine < 0 || functionStartLine >= snapshot.LineCount)
+            {
+                return functionStartLine;
+            }
+
+            bool inBlockComment = false;
+            bool seenFunctionOpeningBrace = false;
+            int braceDepth = 0;
+            for (int lineIndex = functionStartLine; lineIndex < snapshot.LineCount; lineIndex++)
+            {
+                string text = snapshot.GetLineFromLineNumber(lineIndex).GetText();
+                bool inQuotedLiteral = false;
+                char quoteDelimiter = '\0';
+                bool escaped = false;
+                for (int i = 0; i < text.Length; i++)
+                {
+                    char ch = text[i];
+                    char next = i + 1 < text.Length ? text[i + 1] : '\0';
+
+                    if (inBlockComment)
+                    {
+                        if (ch == '*' && next == '/')
+                        {
+                            inBlockComment = false;
+                            i++;
+                        }
+
+                        continue;
+                    }
+
+                    if (inQuotedLiteral)
+                    {
+                        if (escaped)
+                        {
+                            escaped = false;
+                            continue;
+                        }
+
+                        if (ch == '\\')
+                        {
+                            escaped = true;
+                            continue;
+                        }
+
+                        if (ch == quoteDelimiter)
+                        {
+                            inQuotedLiteral = false;
+                        }
+
+                        continue;
+                    }
+
+                    if (ch == '/' && next == '/')
+                    {
+                        break;
+                    }
+
+                    if (ch == '/' && next == '*')
+                    {
+                        inBlockComment = true;
+                        i++;
+                        continue;
+                    }
+
+                    if (ch == '"' || ch == '\'')
+                    {
+                        inQuotedLiteral = true;
+                        quoteDelimiter = ch;
+                        escaped = false;
+                        continue;
+                    }
+
+                    if (ch == '{')
+                    {
+                        if (!seenFunctionOpeningBrace)
+                        {
+                            seenFunctionOpeningBrace = true;
+                        }
+
+                        braceDepth++;
+                    }
+                    else if (ch == '}')
+                    {
+                        if (!seenFunctionOpeningBrace)
+                        {
+                            continue;
+                        }
+
+                        braceDepth--;
+                        if (braceDepth <= 0)
+                        {
+                            return lineIndex;
+                        }
+                    }
+                }
+            }
+
+            return snapshot.LineCount - 1;
+        }
+
         private static bool IsLikelyFunctionOpeningBrace(ITextSnapshot snapshot, int braceLineNumber, int braceColumn)
         {
             int startLine = Math.Max(0, braceLineNumber - 8);
@@ -4413,7 +4730,7 @@ namespace InlineCppVarDbg
             }
         }
 
-        private static EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount, bool emergencyMode = false)
+        private static EvaluationPolicy CreateStandardEvaluationPolicy(int configuredPreviousLineCount, bool emergencyMode = false)
         {
             int clampedPreviousLines = Math.Max(0, configuredPreviousLineCount);
             if (!emergencyMode)
@@ -4439,12 +4756,32 @@ namespace InlineCppVarDbg
                 allowFallbackExpressions: true,
                 allowDataMemberRecursion: false,
                 allowArrayProbing: false,
+                    allowCharProbing: false);
+        }
+
+        private static EvaluationPolicy CreateManualFunctionSweepPolicy(int configuredPreviousLineCount)
+        {
+            int clampedPreviousLines = Math.Max(0, configuredPreviousLineCount);
+            return new EvaluationPolicy(
+                isEmergencyMode: false,
+                previousLineCount: clampedPreviousLines,
+                hardBudgetMs: 4000,
+                perExpressionTimeoutMs: 150,
+                allowGetterCalls: true,
+                allowFallbackExpressions: true,
+                allowDataMemberRecursion: false,
+                allowArrayProbing: false,
                 allowCharProbing: false);
         }
 
-        private EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount)
+        private EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount, bool manualVariableFunctionSweep)
         {
-            return CreateEvaluationPolicy(configuredPreviousLineCount, emergencyModeStepsRemaining > 0);
+            if (manualVariableFunctionSweep)
+            {
+                return CreateManualFunctionSweepPolicy(configuredPreviousLineCount);
+            }
+
+            return CreateStandardEvaluationPolicy(configuredPreviousLineCount, emergencyModeStepsRemaining > 0);
         }
 
         private static bool ShouldAbortEvaluation()
@@ -4480,6 +4817,38 @@ namespace InlineCppVarDbg
         private static bool HasEvaluationKind(InlineValueEvaluationKinds evaluationKinds, InlineValueEvaluationKinds requiredKind)
         {
             return (evaluationKinds & requiredKind) == requiredKind;
+        }
+
+        private static bool HasRuleKind(InlineValueRuleKinds ruleKinds, InlineValueRuleKinds requiredKind)
+        {
+            return (ruleKinds & requiredKind) == requiredKind;
+        }
+
+        private static CustomRuleDecision GetCustomRuleDecision(
+            IReadOnlyList<InlineValueCustomRule> customRules,
+            string typeText,
+            string expressionText)
+        {
+            if (customRules == null || customRules.Count == 0)
+            {
+                return CustomRuleDecision.None;
+            }
+
+            string nameText = ExtractTrailingIdentifier(expressionText);
+            CustomRuleDecision decision = CustomRuleDecision.None;
+            foreach (InlineValueCustomRule rule in customRules)
+            {
+                if (!rule.Matches(typeText, nameText, expressionText))
+                {
+                    continue;
+                }
+
+                decision = rule.Action == InlineValueCustomRuleAction.Hide
+                    ? CustomRuleDecision.Hide
+                    : CustomRuleDecision.Show;
+            }
+
+            return decision;
         }
 
         private static EnvDTE.Expression TimedGetExpression(Debugger debugger, string expressionText, int timeout, string phase)
@@ -4584,13 +4953,93 @@ namespace InlineCppVarDbg
             return border;
         }
 
+        private bool TryResolveManualGetterRequest(Point mousePosition, out string expressionText)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            expressionText = null;
+            if (!settings.IsEnabled || !debuggerBridge.TryGetCurrentBreakContext(out DebuggerBridge.BreakContext context))
+            {
+                return false;
+            }
+
+            var line = textView.TextViewLines?.GetTextViewLineContainingYCoordinate(mousePosition.Y);
+            if (line == null)
+            {
+                return false;
+            }
+
+            SnapshotPoint? bufferPoint = line.GetBufferPositionFromXCoordinate(mousePosition.X);
+            if (!bufferPoint.HasValue || bufferPoint.Value.Snapshot != textBuffer.CurrentSnapshot)
+            {
+                return false;
+            }
+
+            ITextSnapshot snapshot = bufferPoint.Value.Snapshot;
+            if (!PathsEqual(normalizedDocumentPath, NormalizePath(context.FileName)))
+            {
+                return false;
+            }
+
+            ITextSnapshotLine snapshotLine = bufferPoint.Value.GetContainingLine();
+            if (snapshotLine.LineNumber > context.LineNumber - 1)
+            {
+                return false;
+            }
+
+            string lineText = snapshotLine.GetText();
+            int lineOffset = bufferPoint.Value.Position - snapshotLine.Start.Position;
+            List<CppCurrentLineTokenizer.IdentifierToken> tokens = CppCurrentLineTokenizer.TokenizeIdentifiers(lineText);
+            foreach (CppCurrentLineTokenizer.IdentifierToken token in tokens)
+            {
+                if (lineOffset < token.Start || lineOffset > token.Start + token.Length)
+                {
+                    continue;
+                }
+
+                if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall) ||
+                    !TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall))
+                {
+                    return false;
+                }
+
+                expressionText = boundGetterCall.ExpressionText;
+                return true;
+            }
+
+            return false;
+        }
+
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
         {
             Invalidate();
         }
 
+        private void OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (disposed || textView.IsClosed)
+            {
+                return;
+            }
+
+            if ((Keyboard.Modifiers & ModifierKeys.Control) != ModifierKeys.Control)
+            {
+                return;
+            }
+
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!TryResolveManualGetterRequest(e.GetPosition(textView.VisualElement), out string expressionText))
+            {
+                return;
+            }
+
+            manualGetterRequests.Add(expressionText);
+            Invalidate();
+            e.Handled = true;
+        }
+
         private void OnDebugStateChanged(object sender, EventArgs e)
         {
+            manualGetterRequests.Clear();
             Invalidate();
         }
 
@@ -4638,6 +5087,7 @@ namespace InlineCppVarDbg
             disposed = true;
             textBuffer.Changed -= OnBufferChanged;
             textView.Closed -= OnTextViewClosed;
+            textView.VisualElement.PreviewMouseLeftButtonDown -= OnPreviewMouseLeftButtonDown;
             debuggerBridge.DebugStateChanged -= OnDebugStateChanged;
             settings.SettingsChanged -= OnSettingsChanged;
         }
@@ -5056,6 +5506,13 @@ namespace InlineCppVarDbg
         {
             SymbolAndInteger = 0,
             IntegerOnly = 1,
+        }
+
+        private enum CustomRuleDecision
+        {
+            None = 0,
+            Show = 1,
+            Hide = 2,
         }
 
         private readonly struct TagEntry

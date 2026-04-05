@@ -50,6 +50,26 @@
           <ToolTipText>Cycle numeric display mode between hex, decimal, and binary.</ToolTipText>
         </Strings>
       </Button>
+
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateGetterValuesInFunction" priority="0x0130" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>GET</ButtonText>
+          <MenuText>Evaluate Get/Is In Function</MenuText>
+          <ToolTipText>Manually evaluate visible Get/Is return values in the current function for this break state.</ToolTipText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateAllValuesInFunction" priority="0x0140" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>ALL</ButtonText>
+          <MenuText>Evaluate All Values In Function</MenuText>
+          <ToolTipText>Manually show all eligible variable values in the current function for this break state, even if it is slower.</ToolTipText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -57,6 +77,8 @@
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleInlineValuesOn" priority="0x0100"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleValueDisplayModeIn" priority="0x0110"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleNumericDisplayModeHex" priority="0x0120"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
+    <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateGetterValuesInFunction" priority="0x0130"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
+    <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateAllValuesInFunction" priority="0x0140"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
   </CommandPlacements>
 
   <Symbols>
@@ -68,6 +90,8 @@
       <IDSymbol name="cmdidToggleInlineValuesOn" value="0x0100" />
       <IDSymbol name="cmdidToggleValueDisplayModeIn" value="0x0101" />
       <IDSymbol name="cmdidToggleNumericDisplayModeHex" value="0x0102" />
+      <IDSymbol name="cmdidEvaluateGetterValuesInFunction" value="0x0103" />
+      <IDSymbol name="cmdidEvaluateAllValuesInFunction" value="0x0104" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

@@ -1,6 +1,7 @@
 using Microsoft.VisualStudio.Settings;
 using Microsoft.VisualStudio.Shell.Settings;
 using System;
+using System.Collections.Generic;
 
 namespace InlineCppVarDbg
 {
@@ -16,10 +17,22 @@ namespace InlineCppVarDbg
         public const string ValueChipFontSizePropertyName = "ValueChipFontSize";
         public const string NumericDisplayModePropertyName = "NumericDisplayMode";
         public const string EvaluationKindsPropertyName = "EvaluationKinds";
+        public const string RuleKindsPropertyName = "RuleKinds";
+        public const string CustomRulesPropertyName = "CustomRules";
         private const int DefaultPreviousLineCount = 20;
         private const InlineValueDisplayMode DefaultDisplayMode = InlineValueDisplayMode.Inline;
         private const InlineValueNumericDisplayMode DefaultNumericDisplayMode = InlineValueNumericDisplayMode.Decimal;
-        private const InlineValueEvaluationKinds DefaultEvaluationKinds = InlineValueEvaluationKinds.All;
+        private const InlineValueEvaluationKinds DefaultEvaluationKinds =
+            InlineValueEvaluationKinds.BasicScalars |
+            InlineValueEvaluationKinds.Enums |
+            InlineValueEvaluationKinds.Arrays |
+            InlineValueEvaluationKinds.IndexedExpressions |
+            InlineValueEvaluationKinds.FallbackExpressions |
+            InlineValueEvaluationKinds.NullPointers |
+            InlineValueEvaluationKinds.UninitializedValues;
+        private const InlineValueRuleKinds DefaultRuleKinds =
+            InlineValueRuleKinds.IntegralPointers |
+            InlineValueRuleKinds.ParameterAnchors;
         private const int MaxPreviousLineCount = 200;
         private const string DefaultValueBackgroundColor = "#E5E5E5";
         private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
@@ -40,6 +53,9 @@ namespace InlineCppVarDbg
         private int valueChipFontSize;
         private InlineValueNumericDisplayMode numericDisplayMode;
         private InlineValueEvaluationKinds evaluationKinds;
+        private InlineValueRuleKinds ruleKinds;
+        private string customRulesText;
+        private IReadOnlyList<InlineValueCustomRule> customRules;
 
         public event EventHandler SettingsChanged;
 
@@ -62,6 +78,9 @@ namespace InlineCppVarDbg
             valueChipFontSize = ReadValueChipFontSizeOrDefault();
             numericDisplayMode = ReadNumericDisplayModeOrDefault();
             evaluationKinds = ReadEvaluationKindsOrDefault();
+            ruleKinds = ReadRuleKindsOrDefault();
+            customRulesText = ReadCustomRulesOrDefault();
+            customRules = InlineValueCustomRuleParser.Parse(customRulesText);
         }
 
         public bool IsEnabled
@@ -159,6 +178,39 @@ namespace InlineCppVarDbg
                 lock (gate)
                 {
                     return evaluationKinds;
+                }
+            }
+        }
+
+        public InlineValueRuleKinds RuleKinds
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return ruleKinds;
+                }
+            }
+        }
+
+        public string CustomRulesText
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return customRulesText;
+                }
+            }
+        }
+
+        public IReadOnlyList<InlineValueCustomRule> CustomRules
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return customRules;
                 }
             }
         }
@@ -369,6 +421,54 @@ namespace InlineCppVarDbg
             }
         }
 
+        public void SetRuleKinds(InlineValueRuleKinds kinds)
+        {
+            InlineValueRuleKinds normalized = NormalizeRuleKinds(kinds);
+            bool changed;
+
+            lock (gate)
+            {
+                if (ruleKinds == normalized)
+                {
+                    return;
+                }
+
+                ruleKinds = normalized;
+                PersistRuleKinds(normalized);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                SettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        public void SetCustomRulesText(string text)
+        {
+            string normalized = InlineValueCustomRuleParser.Normalize(text);
+            IReadOnlyList<InlineValueCustomRule> parsed = InlineValueCustomRuleParser.Parse(normalized);
+            bool changed;
+
+            lock (gate)
+            {
+                if (string.Equals(customRulesText, normalized, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                customRulesText = normalized;
+                customRules = parsed;
+                PersistCustomRules(normalized);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                SettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
         private bool ReadEnabledOrDefault()
         {
             if (store.PropertyExists(CollectionPath, EnabledPropertyName))
@@ -538,6 +638,42 @@ namespace InlineCppVarDbg
             return DefaultEvaluationKinds;
         }
 
+        private InlineValueRuleKinds ReadRuleKindsOrDefault()
+        {
+            if (store.PropertyExists(CollectionPath, RuleKindsPropertyName))
+            {
+                try
+                {
+                    return NormalizeRuleKinds((InlineValueRuleKinds)store.GetInt32(CollectionPath, RuleKindsPropertyName));
+                }
+                catch
+                {
+                    return DefaultRuleKinds;
+                }
+            }
+
+            PersistRuleKinds(DefaultRuleKinds);
+            return DefaultRuleKinds;
+        }
+
+        private string ReadCustomRulesOrDefault()
+        {
+            if (store.PropertyExists(CollectionPath, CustomRulesPropertyName))
+            {
+                try
+                {
+                    return InlineValueCustomRuleParser.Normalize(store.GetString(CollectionPath, CustomRulesPropertyName));
+                }
+                catch
+                {
+                    return string.Empty;
+                }
+            }
+
+            PersistCustomRules(string.Empty);
+            return string.Empty;
+        }
+
         private void PersistEnabled(bool value)
         {
             store.SetBoolean(CollectionPath, EnabledPropertyName, value);
@@ -581,6 +717,16 @@ namespace InlineCppVarDbg
         private void PersistEvaluationKinds(InlineValueEvaluationKinds kinds)
         {
             store.SetInt32(CollectionPath, EvaluationKindsPropertyName, (int)NormalizeEvaluationKinds(kinds));
+        }
+
+        private void PersistRuleKinds(InlineValueRuleKinds kinds)
+        {
+            store.SetInt32(CollectionPath, RuleKindsPropertyName, (int)NormalizeRuleKinds(kinds));
+        }
+
+        private void PersistCustomRules(string text)
+        {
+            store.SetString(CollectionPath, CustomRulesPropertyName, InlineValueCustomRuleParser.Normalize(text));
         }
 
         private static int ClampPreviousLineCount(int value)
@@ -638,6 +784,11 @@ namespace InlineCppVarDbg
         private static InlineValueEvaluationKinds NormalizeEvaluationKinds(InlineValueEvaluationKinds kinds)
         {
             return kinds & InlineValueEvaluationKinds.All;
+        }
+
+        private static InlineValueRuleKinds NormalizeRuleKinds(InlineValueRuleKinds kinds)
+        {
+            return kinds & InlineValueRuleKinds.All;
         }
 
         private static string NormalizeColorOrDefault(string value)

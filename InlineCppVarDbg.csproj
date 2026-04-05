@@ -48,9 +48,13 @@
   <ItemGroup>
     <Compile Include="CppCurrentLineTokenizer.cs" />
     <Compile Include="DebuggerBridge.cs" />
+    <Compile Include="EvaluateAllValuesInFunctionCommand.cs" />
+    <Compile Include="EvaluateGetterValuesInFunctionCommand.cs" />
+    <Compile Include="InlineValueCustomRule.cs" />
     <Compile Include="InlineValueEvaluationKinds.cs" />
     <Compile Include="InlineValueDisplayMode.cs" />
     <Compile Include="InlineValueNumericDisplayMode.cs" />
+    <Compile Include="InlineValueRuleKinds.cs" />
     <Compile Include="InlineValueTagger.cs" />
     <Compile Include="InlineValueTaggerProvider.cs" />
     <Compile Include="InlineValuesOptionsPage.cs">

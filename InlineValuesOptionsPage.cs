@@ -1,6 +1,7 @@
 using Microsoft.VisualStudio.Shell;
 using System;
 using System.ComponentModel;
+using System.ComponentModel.Design;
 using System.Drawing;
 using System.Drawing.Design;
 
@@ -20,7 +21,18 @@ namespace InlineCppVarDbg
         private Color uninitializedValueBackgroundColor = ParseHexColor(DefaultUninitializedValueBackgroundColor, DefaultUninitializedValueBackgroundColor);
         private Color valueChangedAccentColor = ParseHexColor(DefaultValueChangedAccentColor, DefaultValueChangedAccentColor);
         private int valueChipFontSize = DefaultValueChipFontSize;
-        private InlineValueEvaluationKinds evaluationKinds = InlineValueEvaluationKinds.All;
+        private InlineValueEvaluationKinds evaluationKinds =
+            InlineValueEvaluationKinds.BasicScalars |
+            InlineValueEvaluationKinds.Enums |
+            InlineValueEvaluationKinds.Arrays |
+            InlineValueEvaluationKinds.IndexedExpressions |
+            InlineValueEvaluationKinds.FallbackExpressions |
+            InlineValueEvaluationKinds.NullPointers |
+            InlineValueEvaluationKinds.UninitializedValues;
+        private InlineValueRuleKinds ruleKinds =
+            InlineValueRuleKinds.IntegralPointers |
+            InlineValueRuleKinds.ParameterAnchors;
+        private string customRulesText = string.Empty;
 
         [Category("General")]
         [DisplayName("Previous line count")]
@@ -108,7 +120,7 @@ namespace InlineCppVarDbg
 
         [Category("Evaluation")]
         [DisplayName("Get/Is function calls")]
-        [Description("Evaluate zero-argument Get*() and Is*() calls when their return type is eligible.")]
+        [Description("Automatically evaluate zero-argument Get*() and Is*() calls. When disabled, Ctrl+Click a getter in the editor to evaluate it manually for the current break state.")]
         public bool EvaluateGetterCalls
         {
             get => HasEvaluationKind(InlineValueEvaluationKinds.GetterCalls);
@@ -151,6 +163,43 @@ namespace InlineCppVarDbg
             set => SetEvaluationKind(InlineValueEvaluationKinds.UninitializedValues, value);
         }
 
+        [Category("Rules")]
+        [DisplayName("Integral pointers")]
+        [Description("Show integer-like pointers as address plus dereferenced value, for example 0x1234ABCD (42).")]
+        public bool ShowIntegralPointers
+        {
+            get => HasRuleKind(InlineValueRuleKinds.IntegralPointers);
+            set => SetRuleKind(InlineValueRuleKinds.IntegralPointers, value);
+        }
+
+        [Category("Rules")]
+        [DisplayName("Parameter anchors")]
+        [Description("Show parameter values near the function signature even when the lookback window does not reach that line.")]
+        public bool ShowParameterAnchors
+        {
+            get => HasRuleKind(InlineValueRuleKinds.ParameterAnchors);
+            set => SetRuleKind(InlineValueRuleKinds.ParameterAnchors, value);
+        }
+
+        [Category("Rules")]
+        [DisplayName("Inactive preprocessor code")]
+        [Description("Parse values in inactive #if/#ifdef regions. Off is recommended.")]
+        public bool ParseInactivePreprocessorCode
+        {
+            get => HasRuleKind(InlineValueRuleKinds.ParseInactivePreprocessor);
+            set => SetRuleKind(InlineValueRuleKinds.ParseInactivePreprocessor, value);
+        }
+
+        [Category("Rules")]
+        [DisplayName("Custom rules")]
+        [Description("One rule per line. Syntax: show type:<pattern>, hide type:<pattern>, show name:<pattern>, hide expr:<pattern>. Wildcards * and ? are supported.")]
+        [Editor(typeof(MultilineStringEditor), typeof(UITypeEditor))]
+        public string CustomRulesText
+        {
+            get => customRulesText;
+            set => customRulesText = value ?? string.Empty;
+        }
+
         protected override void OnActivate(CancelEventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -166,6 +215,8 @@ namespace InlineCppVarDbg
                 valueChangedAccentColor = ParseHexColor(settings.ValueChangedAccentColor, DefaultValueChangedAccentColor);
                 valueChipFontSize = settings.ValueChipFontSize;
                 evaluationKinds = settings.EvaluationKinds;
+                ruleKinds = settings.RuleKinds;
+                customRulesText = settings.CustomRulesText;
             }
         }
 
@@ -184,6 +235,8 @@ namespace InlineCppVarDbg
                 settings.SetValueChangedAccentColor(ToHex(valueChangedAccentColor));
                 settings.SetValueChipFontSize(valueChipFontSize);
                 settings.SetEvaluationKinds(evaluationKinds);
+                settings.SetRuleKinds(ruleKinds);
+                settings.SetCustomRulesText(customRulesText);
             }
         }
 
@@ -201,6 +254,23 @@ namespace InlineCppVarDbg
             else
             {
                 evaluationKinds &= ~kind;
+            }
+        }
+
+        private bool HasRuleKind(InlineValueRuleKinds kind)
+        {
+            return (ruleKinds & kind) == kind;
+        }
+
+        private void SetRuleKind(InlineValueRuleKinds kind, bool enabled)
+        {
+            if (enabled)
+            {
+                ruleKinds |= kind;
+            }
+            else
+            {
+                ruleKinds &= ~kind;
             }
         }
 

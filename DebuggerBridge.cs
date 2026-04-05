@@ -13,6 +13,8 @@ namespace InlineCppVarDbg
         private readonly DebuggerEvents debuggerEvents;
         private readonly _dispDebuggerEvents_Event debuggerEventsEvent;
         private int version;
+        private int manualGetterFunctionSweepRequested;
+        private int manualVariableFunctionSweepRequested;
 
         public event EventHandler DebugStateChanged;
 
@@ -40,6 +42,10 @@ namespace InlineCppVarDbg
         }
 
         public int Version => Volatile.Read(ref version);
+
+        public bool IsManualGetterFunctionSweepRequested => Volatile.Read(ref manualGetterFunctionSweepRequested) != 0;
+
+        public bool IsManualVariableFunctionSweepRequested => Volatile.Read(ref manualVariableFunctionSweepRequested) != 0;
 
         public bool IsInDesignMode()
         {
@@ -107,23 +113,43 @@ namespace InlineCppVarDbg
             IncrementVersionAndNotify();
         }
 
+        public void RequestManualGetterFunctionSweep()
+        {
+            Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 1);
+            IncrementVersionAndNotify();
+        }
+
+        public void RequestManualVariableFunctionSweep()
+        {
+            Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 1);
+            IncrementVersionAndNotify();
+        }
+
         private void OnEnterBreakMode(dbgEventReason Reason, ref dbgExecutionAction ExecutionAction)
         {
+            Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
         private void OnContextChanged(Process NewProcess, Program NewProgram, EnvDTE.Thread NewThread, StackFrame NewStackFrame)
         {
+            Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
         private void OnEnterRunMode(dbgEventReason Reason)
         {
+            Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
         private void OnEnterDesignMode(dbgEventReason Reason)
         {
+            Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
