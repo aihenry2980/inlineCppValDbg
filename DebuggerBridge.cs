@@ -15,6 +15,7 @@ namespace InlineCppVarDbg
         private int version;
         private int manualGetterFunctionSweepRequested;
         private int manualVariableFunctionSweepRequested;
+        private int profileNextEvaluationRequestKind;
 
         public event EventHandler DebugStateChanged;
 
@@ -113,6 +114,11 @@ namespace InlineCppVarDbg
             IncrementVersionAndNotify();
         }
 
+        public void RequestProfileForNextEvaluation(ProfileRequestKind requestKind)
+        {
+            Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)requestKind);
+        }
+
         public void RequestManualGetterFunctionSweep()
         {
             Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 1);
@@ -125,10 +131,20 @@ namespace InlineCppVarDbg
             IncrementVersionAndNotify();
         }
 
+        public bool TryConsumeProfileForNextEvaluation(out ProfileRequestKind requestKind)
+        {
+            int rawValue = Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
+            requestKind = rawValue >= (int)ProfileRequestKind.GetButton && rawValue <= (int)ProfileRequestKind.ToggleOnButton
+                ? (ProfileRequestKind)rawValue
+                : ProfileRequestKind.None;
+            return requestKind != ProfileRequestKind.None;
+        }
+
         private void OnEnterBreakMode(dbgEventReason Reason, ref dbgExecutionAction ExecutionAction)
         {
             Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             IncrementVersionAndNotify();
         }
 
@@ -136,6 +152,7 @@ namespace InlineCppVarDbg
         {
             Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             IncrementVersionAndNotify();
         }
 
@@ -143,6 +160,7 @@ namespace InlineCppVarDbg
         {
             Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             IncrementVersionAndNotify();
         }
 
@@ -150,6 +168,7 @@ namespace InlineCppVarDbg
         {
             Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
+            Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             IncrementVersionAndNotify();
         }
 
@@ -173,6 +192,13 @@ namespace InlineCppVarDbg
             public StackFrame2 StackFrame { get; }
             public string FileName { get; }
             public int LineNumber { get; }
+        }
+
+        internal enum ProfileRequestKind
+        {
+            None = 0,
+            GetButton = 1,
+            ToggleOnButton = 2,
         }
     }
 }

@@ -35,9 +35,15 @@ namespace InlineCppVarDbg
             ThreadHelper.ThrowIfNotOnUIThread();
 
             InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(package);
-            settings.SetEnabled(!settings.IsEnabled);
+            bool newEnabledState = !settings.IsEnabled;
+            settings.SetEnabled(newEnabledState);
 
             DebuggerBridge bridge = InlineValuesServiceLocator.GetBridge(package);
+            if (newEnabledState)
+            {
+                bridge.RequestProfileForNextEvaluation(DebuggerBridge.ProfileRequestKind.ToggleOnButton);
+            }
+
             bridge.RaiseExternalInvalidate();
         }
 

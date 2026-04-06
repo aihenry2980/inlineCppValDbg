@@ -55,6 +55,7 @@
     <Compile Include="InlineValueDisplayMode.cs" />
     <Compile Include="InlineValueNumericDisplayMode.cs" />
     <Compile Include="InlineValueRuleKinds.cs" />
+    <Compile Include="InlineValueTypeRuleKinds.cs" />
     <Compile Include="InlineValueTagger.cs" />
     <Compile Include="InlineValueTaggerProvider.cs" />
     <Compile Include="InlineValuesOptionsPage.cs">

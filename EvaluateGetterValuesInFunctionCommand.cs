@@ -33,7 +33,13 @@ namespace InlineCppVarDbg
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
+            InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(package);
             DebuggerBridge bridge = InlineValuesServiceLocator.GetBridge(package);
+            if (settings.IsEnabled)
+            {
+                bridge.RequestProfileForNextEvaluation(DebuggerBridge.ProfileRequestKind.GetButton);
+            }
+
             bridge.RequestManualGetterFunctionSweep();
         }
 

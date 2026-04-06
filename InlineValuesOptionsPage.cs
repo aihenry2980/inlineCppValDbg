@@ -15,6 +15,18 @@ namespace InlineCppVarDbg
         private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
         private const string DefaultValueChangedAccentColor = "#FF8FB1";
         private const int DefaultValueChipFontSize = 10;
+        private const InlineValueTypeRuleKinds DefaultTypeRuleKinds =
+            InlineValueTypeRuleKinds.BooleanScalars |
+            InlineValueTypeRuleKinds.CharacterScalars |
+            InlineValueTypeRuleKinds.IntegralScalars |
+            InlineValueTypeRuleKinds.FloatingPointScalars |
+            InlineValueTypeRuleKinds.EnumValues |
+            InlineValueTypeRuleKinds.BooleanArrays |
+            InlineValueTypeRuleKinds.CharacterArrays |
+            InlineValueTypeRuleKinds.IntegralArrays |
+            InlineValueTypeRuleKinds.FloatingPointArrays |
+            InlineValueTypeRuleKinds.EnumArrays |
+            InlineValueTypeRuleKinds.IntegralPointers;
         private int previousLineCount = DefaultPreviousLineCount;
         private InlineValueDisplayMode displayMode = DefaultDisplayMode;
         private Color valueBackgroundColor = ParseHexColor(DefaultValueBackgroundColor, DefaultValueBackgroundColor);
@@ -32,6 +44,7 @@ namespace InlineCppVarDbg
         private InlineValueRuleKinds ruleKinds =
             InlineValueRuleKinds.IntegralPointers |
             InlineValueRuleKinds.ParameterAnchors;
+        private InlineValueTypeRuleKinds typeRuleKinds = DefaultTypeRuleKinds;
         private string customRulesText = string.Empty;
 
         [Category("General")]
@@ -164,8 +177,8 @@ namespace InlineCppVarDbg
         }
 
         [Category("Rules")]
-        [DisplayName("Integral pointers")]
-        [Description("Show integer-like pointers as address plus dereferenced value, for example 0x1234ABCD (42).")]
+        [DisplayName("Integral pointer master switch")]
+        [Description("Master enable for integral pointer dereference formatting. The detailed Integral pointers checkbox must also be enabled.")]
         public bool ShowIntegralPointers
         {
             get => HasRuleKind(InlineValueRuleKinds.IntegralPointers);
@@ -188,6 +201,150 @@ namespace InlineCppVarDbg
         {
             get => HasRuleKind(InlineValueRuleKinds.ParseInactivePreprocessor);
             set => SetRuleKind(InlineValueRuleKinds.ParseInactivePreprocessor, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Bool scalars")]
+        [Description("Show plain bool values. Applies only when Basic scalar values is enabled.")]
+        public bool ShowBooleanScalars
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.BooleanScalars);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.BooleanScalars, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Char scalars")]
+        [Description("Show char, wchar_t, char8_t, char16_t, and char32_t values. Applies only when Basic scalar values is enabled.")]
+        public bool ShowCharacterScalars
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.CharacterScalars);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.CharacterScalars, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Integral scalars")]
+        [Description("Show integral scalar values such as short, int, long, size_t, and ptrdiff_t. Applies only when Basic scalar values is enabled.")]
+        public bool ShowIntegralScalars
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.IntegralScalars);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.IntegralScalars, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Floating scalars")]
+        [Description("Show float and double values. Applies only when Basic scalar values is enabled.")]
+        public bool ShowFloatingPointScalars
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.FloatingPointScalars);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.FloatingPointScalars, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Enum values")]
+        [Description("Show enum values. Applies only when Enum values is enabled.")]
+        public bool ShowDetailedEnumValues
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.EnumValues);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.EnumValues, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Bool arrays")]
+        [Description("Show bool arrays using a short inline preview. Applies only when Array values is enabled.")]
+        public bool ShowBooleanArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.BooleanArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.BooleanArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Char/string arrays")]
+        [Description("Show char-like arrays using a short character or string preview. Applies only when Array values is enabled.")]
+        public bool ShowCharacterArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.CharacterArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.CharacterArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Integral arrays")]
+        [Description("Show arrays of integral element types such as int[] or size_t[]. Applies only when Array values is enabled.")]
+        public bool ShowIntegralArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.IntegralArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.IntegralArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Floating arrays")]
+        [Description("Show arrays of float or double elements. Applies only when Array values is enabled.")]
+        public bool ShowFloatingPointArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.FloatingPointArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.FloatingPointArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Enum arrays")]
+        [Description("Show arrays of enum elements. Applies only when Array values is enabled.")]
+        public bool ShowEnumArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.EnumArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.EnumArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Bool pointers")]
+        [Description("Show bool* values as address plus dereferenced bool. Applies only when Basic scalar values is enabled.")]
+        public bool ShowBooleanPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.BooleanPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.BooleanPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Char/string pointers")]
+        [Description("Show char-like pointers using a short string preview when possible.")]
+        public bool ShowCharacterPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.CharacterPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.CharacterPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Integral pointers")]
+        [Description("Show integer-like pointers as address plus dereferenced value, for example int* or uint32_t*. Applies only when Basic scalar values is enabled.")]
+        public bool ShowDetailedIntegralPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.IntegralPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.IntegralPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Floating pointers")]
+        [Description("Show float* and double* values as address plus dereferenced value. Applies only when Basic scalar values is enabled.")]
+        public bool ShowFloatingPointPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.FloatingPointPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.FloatingPointPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Enum pointers")]
+        [Description("Show enum* values as address plus dereferenced enum value. Applies only when Enum values is enabled.")]
+        public bool ShowEnumPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.EnumPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.EnumPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Class/struct pointers")]
+        [Description("Show class* and struct* values as address plus a short dereferenced summary when possible.")]
+        public bool ShowStructPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.StructPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.StructPointers, value);
         }
 
         [Category("Rules")]
@@ -216,6 +373,7 @@ namespace InlineCppVarDbg
                 valueChipFontSize = settings.ValueChipFontSize;
                 evaluationKinds = settings.EvaluationKinds;
                 ruleKinds = settings.RuleKinds;
+                typeRuleKinds = settings.TypeRuleKinds;
                 customRulesText = settings.CustomRulesText;
             }
         }
@@ -236,6 +394,7 @@ namespace InlineCppVarDbg
                 settings.SetValueChipFontSize(valueChipFontSize);
                 settings.SetEvaluationKinds(evaluationKinds);
                 settings.SetRuleKinds(ruleKinds);
+                settings.SetTypeRuleKinds(typeRuleKinds);
                 settings.SetCustomRulesText(customRulesText);
             }
         }
@@ -271,6 +430,23 @@ namespace InlineCppVarDbg
             else
             {
                 ruleKinds &= ~kind;
+            }
+        }
+
+        private bool HasTypeRuleKind(InlineValueTypeRuleKinds kind)
+        {
+            return (typeRuleKinds & kind) == kind;
+        }
+
+        private void SetTypeRuleKind(InlineValueTypeRuleKinds kind, bool enabled)
+        {
+            if (enabled)
+            {
+                typeRuleKinds |= kind;
+            }
+            else
+            {
+                typeRuleKinds &= ~kind;
             }
         }
 

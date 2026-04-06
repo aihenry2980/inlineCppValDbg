@@ -26,12 +26,9 @@ namespace InlineCppVarDbg
         private const string DefaultUninitializedChipBackgroundHex = "#FFF59D";
         private const string DefaultChangedAccentHex = "#FF8FB1";
         private const int MaxManualFadeSteps = 5;
-        private const int DefaultHardBudgetMs = 100;
         private const int DefaultPerExpressionTimeoutMs = 10;
-        private const int EmergencyHardBudgetMs = 60;
-        private const int EmergencyPerExpressionTimeoutMs = 5;
-        private const int EmergencyModeStepCount = 5;
         private const long PerfLogThresholdMs = 250;
+        private const long RequestedProfileLogThresholdMs = 3000;
         private const long SlowEvaluationThresholdMs = 25;
         private const string NullValueMarker = "\u0001N:";
         private const string UninitializedValueMarker = "\u0001U:";
@@ -91,8 +88,6 @@ namespace InlineCppVarDbg
         private Dictionary<string, string> lastResolvedValues = new Dictionary<string, string>(StringComparer.Ordinal);
         private Dictionary<string, int> lastHighlightLevels = new Dictionary<string, int>(StringComparer.Ordinal);
         private readonly HashSet<string> manualGetterRequests = new HashSet<string>(StringComparer.Ordinal);
-        private int policyVersion = -1;
-        private int emergencyModeStepsRemaining;
         [ThreadStatic]
         private static PerfSession currentPerfSession;
 
@@ -247,7 +242,6 @@ namespace InlineCppVarDbg
                 return null;
             }
 
-            AdvanceEvaluationPolicy(debuggerBridge.Version);
             bool manualVariableFunctionSweep = debuggerBridge.IsManualVariableFunctionSweepRequested;
             EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount, manualVariableFunctionSweep);
             int functionStartLineNumber = FindEnclosingFunctionStartLine(snapshot, lineNumber);
@@ -271,7 +265,11 @@ namespace InlineCppVarDbg
             InlineValueNumericDisplayMode numericDisplayMode = settings.NumericDisplayMode;
             InlineValueEvaluationKinds evaluationKinds = settings.EvaluationKinds;
             InlineValueRuleKinds ruleKinds = settings.RuleKinds;
+            InlineValueTypeRuleKinds typeRuleKinds = settings.TypeRuleKinds;
             IReadOnlyList<InlineValueCustomRule> customRules = settings.CustomRules;
+            DebuggerBridge.ProfileRequestKind profileRequestKind = debuggerBridge.TryConsumeProfileForNextEvaluation(out DebuggerBridge.ProfileRequestKind consumedProfileRequestKind)
+                ? consumedProfileRequestKind
+                : DebuggerBridge.ProfileRequestKind.None;
 
             var tokensByLine = new List<LineTokens>();
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
@@ -296,7 +294,6 @@ namespace InlineCppVarDbg
                 foreach (CppCurrentLineTokenizer.IdentifierToken token in rawTokens)
                 {
                     if (scanGetterTokens &&
-                        evaluationPolicy.AllowGetterCalls &&
                         TryParseGetterCall(lineText, token, out GetterCallToken getterCall) &&
                         TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall))
                     {
@@ -309,7 +306,6 @@ namespace InlineCppVarDbg
                     }
 
                     if (scanRegularTokens &&
-                        evaluationPolicy.AllowGetterCalls &&
                         HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.IndexedExpressions) &&
                         TryParseArrayIndexAccess(lineText, token, out GetterCallToken indexedCall))
                     {
@@ -351,28 +347,20 @@ namespace InlineCppVarDbg
 
             Dictionary<string, string> valueMap;
             Dictionary<string, string> getterValueMap;
-            bool budgetExceeded;
-            using (PerfSession perfSession = PerfSession.Start(documentPath, lineNumber + 1, debuggerBridge.Version, evaluationPolicy))
+            using (PerfSession perfSession = PerfSession.Start(documentPath, lineNumber + 1, debuggerBridge.Version, evaluationPolicy, profileRequestKind))
             {
                 currentPerfSession = perfSession;
                 try
                 {
-                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds, ruleKinds, customRules);
-                    getterValueMap = evaluationPolicy.AllowGetterCalls && allGetterCalls.Count > 0
-                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, customRules)
+                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                    getterValueMap = allGetterCalls.Count > 0
+                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterFunctionSweep, manualGetterRequests)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
                 }
                 finally
                 {
                     currentPerfSession = null;
                 }
-
-                budgetExceeded = perfSession.BudgetExceeded;
-            }
-
-            if (budgetExceeded)
-            {
-                emergencyModeStepsRemaining = Math.Max(emergencyModeStepsRemaining, EmergencyModeStepCount);
             }
 
             foreach (KeyValuePair<string, string> pair in getterValueMap)
@@ -608,6 +596,7 @@ namespace InlineCppVarDbg
             InlineValueNumericDisplayMode numericDisplayMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
             IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -628,7 +617,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions locals = stackFrame.Locals2[true];
                 RecordPerf("StackFrame.Locals2", "Locals2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, customRules);
+                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
             }
             catch (COMException)
             {
@@ -644,7 +633,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions arguments = stackFrame.Arguments2[true];
                 RecordPerf("StackFrame.Arguments2", "Arguments2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, customRules);
+                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
             }
             catch (COMException)
             {
@@ -674,7 +663,7 @@ namespace InlineCppVarDbg
                     EnvDTE.Expression expression = TimedGetExpression(debugger, identifier, 50, "Fallback.GetExpression");
                     if (expression != null && expression.IsValidValue)
                     {
-                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, customRules);
+                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     }
                 }
                 catch (COMException)
@@ -691,7 +680,10 @@ namespace InlineCppVarDbg
             InlineValueNumericDisplayMode numericDisplayMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
-            IReadOnlyList<InlineValueCustomRule> customRules)
+            InlineValueTypeRuleKinds typeRuleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules,
+            bool allowManualGetterFunctionSweep,
+            ISet<string> manualGetterExpressions)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -713,7 +705,10 @@ namespace InlineCppVarDbg
                     continue;
                 }
 
-                if (!HasEvaluationKind(evaluationKinds, getterCall.EvaluationKind))
+                bool isManualGetterRequest =
+                    allowManualGetterFunctionSweep ||
+                    (manualGetterExpressions != null && manualGetterExpressions.Contains(getterCall.ExpressionText));
+                if (!isManualGetterRequest && !HasEvaluationKind(evaluationKinds, getterCall.EvaluationKind))
                 {
                     continue;
                 }
@@ -747,6 +742,7 @@ namespace InlineCppVarDbg
                         EnumValueRenderMode.IntegerOnly,
                         evaluationKinds,
                         ruleKinds,
+                        typeRuleKinds,
                         customRules,
                         out string displayValue))
                     {
@@ -773,6 +769,7 @@ namespace InlineCppVarDbg
             EnumValueRenderMode enumValueRenderMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
             IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -804,7 +801,7 @@ namespace InlineCppVarDbg
                     }
 
                     stopwatch.Restart();
-                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, customRules);
+                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     RecordPerf("Expression.TryAddExpressionValue", expression.Name, stopwatch.ElapsedMilliseconds);
                 }
                 catch (COMException)
@@ -821,7 +818,7 @@ namespace InlineCppVarDbg
                     Stopwatch stopwatch = Stopwatch.StartNew();
                     Expressions dataMembers = expression.DataMembers;
                     RecordPerf("Expression.DataMembers", expression.Name, stopwatch.ElapsedMilliseconds);
-                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, customRules);
+                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                 }
                 catch (COMException)
                 {
@@ -840,6 +837,7 @@ namespace InlineCppVarDbg
             EnumValueRenderMode enumValueRenderMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
             IReadOnlyList<InlineValueCustomRule> customRules)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -878,6 +876,7 @@ namespace InlineCppVarDbg
                 enumValueRenderMode,
                 evaluationKinds,
                 ruleKinds,
+                typeRuleKinds,
                 customRules,
                 out string displayValue))
             {
@@ -1560,6 +1559,7 @@ namespace InlineCppVarDbg
             EnumValueRenderMode enumValueRenderMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
             IReadOnlyList<InlineValueCustomRule> customRules,
             out string displayValue)
         {
@@ -1580,14 +1580,16 @@ namespace InlineCppVarDbg
 
             if (TryFormatNullPointerValue(type, rawValue, normalizedValue, out string nullDisplay))
             {
-                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers))
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers) ||
+                    !IsDetailedPointerTypeEnabled(type, rawValue, normalizedValue, typeRuleKinds, allowUnknownKinds: true)))
                 {
                     return false;
                 }
 
                 displayValue = nullDisplay;
             }
-            else if (TryFormatIntegralPointerValue(
+            else if (TryFormatPointerValue(
                 debugger,
                 evalExpressionName,
                 type,
@@ -1596,10 +1598,11 @@ namespace InlineCppVarDbg
                 numericDisplayMode,
                 evaluationKinds,
                 ruleKinds,
+                typeRuleKinds,
                 forceShow,
-                out string integralPointerDisplay))
+                out string pointerDisplay))
             {
-                displayValue = integralPointerDisplay;
+                displayValue = pointerDisplay;
             }
             else if (IsSuppressiblePointerType(type))
             {
@@ -1607,7 +1610,10 @@ namespace InlineCppVarDbg
             }
             else if (IsArrayType(type))
             {
-                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays))
+                InlineValueTypeRuleKinds arrayRuleKind = GetArrayTypeRuleKind(type, rawValue, normalizedValue);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays) ||
+                    !HasTypeRuleKind(typeRuleKinds, arrayRuleKind)))
                 {
                     return false;
                 }
@@ -1632,7 +1638,9 @@ namespace InlineCppVarDbg
             }
             else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
             {
-                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums))
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums) ||
+                    !HasTypeRuleKind(typeRuleKinds, InlineValueTypeRuleKinds.EnumValues)))
                 {
                     return false;
                 }
@@ -1646,7 +1654,10 @@ namespace InlineCppVarDbg
             }
             else if (TryFormatNumericValue(numericDisplayMode, type, normalizedValue, out string numericDisplay))
             {
-                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
                 {
                     return false;
                 }
@@ -1655,7 +1666,10 @@ namespace InlineCppVarDbg
             }
             else if (IsDisplayableScalarType(type))
             {
-                if (!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars))
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
                 {
                     return false;
                 }
@@ -1670,14 +1684,16 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            return !ShouldSuppressValue(type, displayValue, evaluationKinds, ruleKinds, forceShow);
+            return !ShouldSuppressValue(type, rawValue, displayValue, evaluationKinds, ruleKinds, typeRuleKinds, forceShow);
         }
 
         private static bool ShouldSuppressValue(
             string type,
+            string rawValue,
             string normalizedValue,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
             bool forceShow)
         {
             if (string.IsNullOrWhiteSpace(type) || string.IsNullOrEmpty(normalizedValue))
@@ -1687,7 +1703,9 @@ namespace InlineCppVarDbg
 
             if (normalizedValue.StartsWith(NullValueMarker, StringComparison.Ordinal))
             {
-                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers);
+                return !forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers) ||
+                    !IsDetailedPointerTypeEnabled(type, rawValue, normalizedValue, typeRuleKinds, allowUnknownKinds: true));
             }
 
             if (normalizedValue.StartsWith(UninitializedValueMarker, StringComparison.Ordinal))
@@ -1696,32 +1714,226 @@ namespace InlineCppVarDbg
                     !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars));
             }
 
-            if (IsDisplayableIntegralPointerType(type))
-            {
-                return !forceShow && !HasRuleKind(ruleKinds, InlineValueRuleKinds.IntegralPointers);
-            }
-
             if (IsSuppressiblePointerType(type))
             {
-                return true;
+                InlineValueTypeRuleKinds pointerRuleKind = GetPointerTypeRuleKind(type, rawValue, normalizedValue);
+                if (pointerRuleKind == InlineValueTypeRuleKinds.None)
+                {
+                    return true;
+                }
+
+                return !forceShow && !IsPointerRuleEnabled(pointerRuleKind, evaluationKinds, ruleKinds, typeRuleKinds);
             }
 
             if (IsArrayType(type))
             {
-                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays);
+                InlineValueTypeRuleKinds arrayRuleKind = GetArrayTypeRuleKind(type, rawValue, normalizedValue);
+                return !forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays) ||
+                    !HasTypeRuleKind(typeRuleKinds, arrayRuleKind));
             }
 
             if (IsDisplayableEnumType(type, null, normalizedValue))
             {
-                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums);
+                return !forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums) ||
+                    !HasTypeRuleKind(typeRuleKinds, InlineValueTypeRuleKinds.EnumValues));
             }
 
             if (IsDisplayableScalarType(type))
             {
-                return !forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                return !forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind));
             }
 
             return true;
+        }
+
+        private static bool HasTypeRuleKind(InlineValueTypeRuleKinds typeRuleKinds, InlineValueTypeRuleKinds requiredKind)
+        {
+            return requiredKind != InlineValueTypeRuleKinds.None && (typeRuleKinds & requiredKind) == requiredKind;
+        }
+
+        private static bool IsBooleanScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            return ContainsTypeWord(type.ToLowerInvariant(), "bool");
+        }
+
+        private static bool IsCharacterScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            return ContainsTypeWord(lower, "char") ||
+                   ContainsTypeWord(lower, "wchar_t") ||
+                   ContainsTypeWord(lower, "char8_t") ||
+                   ContainsTypeWord(lower, "char16_t") ||
+                   ContainsTypeWord(lower, "char32_t");
+        }
+
+        private static bool IsFloatingPointScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            return ContainsTypeWord(lower, "float") || ContainsTypeWord(lower, "double");
+        }
+
+        private static InlineValueTypeRuleKinds GetScalarTypeRuleKind(string type)
+        {
+            if (IsBooleanScalarType(type))
+            {
+                return InlineValueTypeRuleKinds.BooleanScalars;
+            }
+
+            if (IsCharacterScalarType(type))
+            {
+                return InlineValueTypeRuleKinds.CharacterScalars;
+            }
+
+            if (IsFloatingPointScalarType(type))
+            {
+                return InlineValueTypeRuleKinds.FloatingPointScalars;
+            }
+
+            if (IsIntegralScalarType(type))
+            {
+                return InlineValueTypeRuleKinds.IntegralScalars;
+            }
+
+            return InlineValueTypeRuleKinds.None;
+        }
+
+        private static InlineValueTypeRuleKinds GetArrayTypeRuleKind(string type, string rawValue, string normalizedValue)
+        {
+            if (!IsArrayType(type))
+            {
+                return InlineValueTypeRuleKinds.None;
+            }
+
+            string elementType = ExtractArrayElementType(type);
+            if (IsBooleanScalarType(elementType))
+            {
+                return InlineValueTypeRuleKinds.BooleanArrays;
+            }
+
+            if (IsCharacterScalarType(elementType))
+            {
+                return InlineValueTypeRuleKinds.CharacterArrays;
+            }
+
+            if (IsFloatingPointScalarType(elementType))
+            {
+                return InlineValueTypeRuleKinds.FloatingPointArrays;
+            }
+
+            if (IsIntegralScalarType(elementType))
+            {
+                return InlineValueTypeRuleKinds.IntegralArrays;
+            }
+
+            if (IsDisplayableEnumType(elementType, rawValue, normalizedValue))
+            {
+                return InlineValueTypeRuleKinds.EnumArrays;
+            }
+
+            return InlineValueTypeRuleKinds.None;
+        }
+
+        private static InlineValueTypeRuleKinds GetPointerTypeRuleKind(string type, string rawValue, string normalizedValue)
+        {
+            if (!IsPointerType(type) || IsFunctionPointerType(type))
+            {
+                return InlineValueTypeRuleKinds.None;
+            }
+
+            if (IsCharPointerOrArrayType(type) || LooksLikeStringPointerOrArray(type, rawValue, normalizedValue))
+            {
+                return InlineValueTypeRuleKinds.CharacterPointers;
+            }
+
+            string elementType = ExtractPointerElementType(type);
+            if (IsBooleanScalarType(elementType))
+            {
+                return InlineValueTypeRuleKinds.BooleanPointers;
+            }
+
+            if (IsFloatingPointScalarType(elementType))
+            {
+                return InlineValueTypeRuleKinds.FloatingPointPointers;
+            }
+
+            if (IsDisplayableIntegralPointerType(type))
+            {
+                return InlineValueTypeRuleKinds.IntegralPointers;
+            }
+
+            if (IsExplicitEnumType(elementType))
+            {
+                return InlineValueTypeRuleKinds.EnumPointers;
+            }
+
+            if (IsLikelyClassOrStructPointerType(type))
+            {
+                return InlineValueTypeRuleKinds.StructPointers;
+            }
+
+            return InlineValueTypeRuleKinds.None;
+        }
+
+        private static bool IsPointerRuleEnabled(
+            InlineValueTypeRuleKinds pointerRuleKind,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds)
+        {
+            if (!HasTypeRuleKind(typeRuleKinds, pointerRuleKind))
+            {
+                return false;
+            }
+
+            switch (pointerRuleKind)
+            {
+                case InlineValueTypeRuleKinds.IntegralPointers:
+                    return HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) &&
+                           HasRuleKind(ruleKinds, InlineValueRuleKinds.IntegralPointers);
+                case InlineValueTypeRuleKinds.BooleanPointers:
+                case InlineValueTypeRuleKinds.FloatingPointPointers:
+                    return HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars);
+                case InlineValueTypeRuleKinds.EnumPointers:
+                    return HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums);
+                case InlineValueTypeRuleKinds.CharacterPointers:
+                case InlineValueTypeRuleKinds.StructPointers:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool IsDetailedPointerTypeEnabled(
+            string type,
+            string rawValue,
+            string normalizedValue,
+            InlineValueTypeRuleKinds typeRuleKinds,
+            bool allowUnknownKinds)
+        {
+            InlineValueTypeRuleKinds pointerRuleKind = GetPointerTypeRuleKind(type, rawValue, normalizedValue);
+            return pointerRuleKind == InlineValueTypeRuleKinds.None
+                ? allowUnknownKinds
+                : HasTypeRuleKind(typeRuleKinds, pointerRuleKind);
         }
 
         private static bool IsArrayType(string type)
@@ -1805,7 +2017,7 @@ namespace InlineCppVarDbg
             return true;
         }
 
-        private static bool TryFormatIntegralPointerValue(
+        private static bool TryFormatPointerValue(
             Debugger debugger,
             string expressionName,
             string type,
@@ -1814,14 +2026,14 @@ namespace InlineCppVarDbg
             InlineValueNumericDisplayMode numericDisplayMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
             bool forceShow,
             out string displayValue)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             displayValue = normalizedValue;
-            if ((!forceShow && !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars)) ||
-                (!forceShow && !HasRuleKind(ruleKinds, InlineValueRuleKinds.IntegralPointers)) ||
-                !IsDisplayableIntegralPointerType(type) ||
+            InlineValueTypeRuleKinds pointerRuleKind = GetPointerTypeRuleKind(type, rawValue, normalizedValue);
+            if (pointerRuleKind == InlineValueTypeRuleKinds.None ||
                 string.IsNullOrWhiteSpace(expressionName) ||
                 debugger == null)
             {
@@ -1833,15 +2045,21 @@ namespace InlineCppVarDbg
                 return false;
             }
 
-            string pointerDisplay = ExtractLeadingToken(normalizedValue);
-            if (string.IsNullOrWhiteSpace(pointerDisplay) || !IsAddressLikeValue(pointerDisplay))
+            if (!forceShow && !IsPointerRuleEnabled(pointerRuleKind, evaluationKinds, ruleKinds, typeRuleKinds))
             {
-                pointerDisplay = ExtractLeadingToken(rawValue);
+                return false;
             }
 
-            if (string.IsNullOrWhiteSpace(pointerDisplay))
+            string pointerDisplay = BuildPointerDisplay(rawValue, normalizedValue);
+            if (pointerRuleKind == InlineValueTypeRuleKinds.CharacterPointers)
             {
-                pointerDisplay = normalizedValue.Trim();
+                if (!TryFormatCharPointerOrArrayValue(debugger, expressionName, type, rawValue, normalizedValue, out string stringPointerDisplay))
+                {
+                    return false;
+                }
+
+                displayValue = pointerDisplay + " (" + StripDisplayMarker(stringPointerDisplay) + ")";
+                return true;
             }
 
             string dereferenceExpression = "*(" + expressionName + ")";
@@ -1866,6 +2084,17 @@ namespace InlineCppVarDbg
                 return false;
             }
 
+            if (pointerRuleKind == InlineValueTypeRuleKinds.StructPointers)
+            {
+                if (!TryFormatAggregatePointerValue(dereferencedExpression.Value, normalizedDerefValue, out string aggregateDisplay))
+                {
+                    return false;
+                }
+
+                displayValue = pointerDisplay + " (" + aggregateDisplay + ")";
+                return true;
+            }
+
             if (!TryFormatEligibleValue(
                 debugger,
                 dereferenceExpression,
@@ -1876,6 +2105,7 @@ namespace InlineCppVarDbg
                 EnumValueRenderMode.IntegerOnly,
                 evaluationKinds,
                 ruleKinds,
+                typeRuleKinds,
                 null,
                 out string dereferencedDisplay))
             {
@@ -1883,6 +2113,40 @@ namespace InlineCppVarDbg
             }
 
             displayValue = pointerDisplay + " (" + StripDisplayMarker(dereferencedDisplay) + ")";
+            return true;
+        }
+
+        private static string BuildPointerDisplay(string rawValue, string normalizedValue)
+        {
+            string pointerDisplay = ExtractLeadingToken(normalizedValue);
+            if (string.IsNullOrWhiteSpace(pointerDisplay) || !IsAddressLikeValue(pointerDisplay))
+            {
+                pointerDisplay = ExtractLeadingToken(rawValue);
+            }
+
+            if (string.IsNullOrWhiteSpace(pointerDisplay))
+            {
+                pointerDisplay = normalizedValue.Trim();
+            }
+
+            return pointerDisplay;
+        }
+
+        private static bool TryFormatAggregatePointerValue(string rawValue, string normalizedValue, out string displayValue)
+        {
+            displayValue = normalizedValue;
+            string summary = NormalizeValue(normalizedValue) ?? NormalizeValue(rawValue);
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                return false;
+            }
+
+            if (summary.Length > 48)
+            {
+                summary = summary.Substring(0, 45) + "...";
+            }
+
+            displayValue = summary;
             return true;
         }
 
@@ -4716,58 +4980,24 @@ namespace InlineCppVarDbg
             return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
         }
 
-        private void AdvanceEvaluationPolicy(int debuggerVersion)
-        {
-            if (policyVersion == debuggerVersion)
-            {
-                return;
-            }
-
-            policyVersion = debuggerVersion;
-            if (emergencyModeStepsRemaining > 0)
-            {
-                emergencyModeStepsRemaining--;
-            }
-        }
-
-        private static EvaluationPolicy CreateStandardEvaluationPolicy(int configuredPreviousLineCount, bool emergencyMode = false)
+        private static EvaluationPolicy CreateStandardEvaluationPolicy(int configuredPreviousLineCount)
         {
             int clampedPreviousLines = Math.Max(0, configuredPreviousLineCount);
-            if (!emergencyMode)
-            {
-                return new EvaluationPolicy(
-                    isEmergencyMode: false,
-                    previousLineCount: clampedPreviousLines,
-                    hardBudgetMs: DefaultHardBudgetMs,
-                    perExpressionTimeoutMs: DefaultPerExpressionTimeoutMs,
-                    allowGetterCalls: true,
-                    allowFallbackExpressions: true,
-                    allowDataMemberRecursion: false,
-                    allowArrayProbing: false,
-                    allowCharProbing: false);
-            }
-
             return new EvaluationPolicy(
-                isEmergencyMode: true,
                 previousLineCount: clampedPreviousLines,
-                hardBudgetMs: EmergencyHardBudgetMs,
-                perExpressionTimeoutMs: EmergencyPerExpressionTimeoutMs,
-                allowGetterCalls: true,
+                perExpressionTimeoutMs: DefaultPerExpressionTimeoutMs,
                 allowFallbackExpressions: true,
                 allowDataMemberRecursion: false,
                 allowArrayProbing: false,
-                    allowCharProbing: false);
+                allowCharProbing: false);
         }
 
         private static EvaluationPolicy CreateManualFunctionSweepPolicy(int configuredPreviousLineCount)
         {
             int clampedPreviousLines = Math.Max(0, configuredPreviousLineCount);
             return new EvaluationPolicy(
-                isEmergencyMode: false,
                 previousLineCount: clampedPreviousLines,
-                hardBudgetMs: 4000,
                 perExpressionTimeoutMs: 150,
-                allowGetterCalls: true,
                 allowFallbackExpressions: true,
                 allowDataMemberRecursion: false,
                 allowArrayProbing: false,
@@ -4781,13 +5011,12 @@ namespace InlineCppVarDbg
                 return CreateManualFunctionSweepPolicy(configuredPreviousLineCount);
             }
 
-            return CreateStandardEvaluationPolicy(configuredPreviousLineCount, emergencyModeStepsRemaining > 0);
+            return CreateStandardEvaluationPolicy(configuredPreviousLineCount);
         }
 
         private static bool ShouldAbortEvaluation()
         {
-            PerfSession session = currentPerfSession;
-            return session != null && session.ShouldAbort();
+            return false;
         }
 
         private static bool RuntimeAllowsFallbackExpressions()
@@ -4857,11 +5086,6 @@ namespace InlineCppVarDbg
             PerfSession session = currentPerfSession;
             if (session != null)
             {
-                if (session.ShouldAbort())
-                {
-                    return null;
-                }
-
                 timeout = Math.Min(timeout, session.Policy.PerExpressionTimeoutMs);
             }
 
@@ -4905,6 +5129,19 @@ namespace InlineCppVarDbg
             }
             catch
             {
+            }
+        }
+
+        private static string GetProfileRequestLabel(DebuggerBridge.ProfileRequestKind profileRequestKind)
+        {
+            switch (profileRequestKind)
+            {
+                case DebuggerBridge.ProfileRequestKind.GetButton:
+                    return "GET button";
+                case DebuggerBridge.ProfileRequestKind.ToggleOnButton:
+                    return "ON/off button";
+                default:
+                    return "manual request";
             }
         }
 
@@ -5208,31 +5445,37 @@ namespace InlineCppVarDbg
             private readonly string filePath;
             private readonly int lineNumber;
             private readonly int debuggerVersion;
+            private readonly DebuggerBridge.ProfileRequestKind profileRequestKind;
             private readonly Stopwatch totalStopwatch;
             private readonly Dictionary<string, PerfEntry> entries;
-            private bool budgetExceeded;
 
-            private PerfSession(string filePath, int lineNumber, int debuggerVersion, EvaluationPolicy policy)
+            private PerfSession(
+                string filePath,
+                int lineNumber,
+                int debuggerVersion,
+                EvaluationPolicy policy,
+                DebuggerBridge.ProfileRequestKind profileRequestKind)
             {
                 this.filePath = filePath;
                 this.lineNumber = lineNumber;
                 this.debuggerVersion = debuggerVersion;
+                this.profileRequestKind = profileRequestKind;
                 Policy = policy;
                 totalStopwatch = Stopwatch.StartNew();
                 entries = new Dictionary<string, PerfEntry>(StringComparer.Ordinal);
             }
 
-            public static PerfSession Start(string filePath, int lineNumber, int debuggerVersion, EvaluationPolicy policy)
+            public static PerfSession Start(
+                string filePath,
+                int lineNumber,
+                int debuggerVersion,
+                EvaluationPolicy policy,
+                DebuggerBridge.ProfileRequestKind profileRequestKind)
             {
-                return new PerfSession(filePath, lineNumber, debuggerVersion, policy);
+                return new PerfSession(filePath, lineNumber, debuggerVersion, policy, profileRequestKind);
             }
 
             public EvaluationPolicy Policy { get; }
-
-            public bool BudgetExceeded
-            {
-                get { return budgetExceeded; }
-            }
 
             public void Record(string phase, string subject, long elapsedMs)
             {
@@ -5257,31 +5500,15 @@ namespace InlineCppVarDbg
                 entries[key] = entry;
             }
 
-            public bool ShouldAbort()
-            {
-                if (budgetExceeded)
-                {
-                    return true;
-                }
-
-                if (Policy.HardBudgetMs <= 0)
-                {
-                    return false;
-                }
-
-                if (totalStopwatch.ElapsedMilliseconds < Policy.HardBudgetMs)
-                {
-                    return false;
-                }
-
-                budgetExceeded = true;
-                return true;
-            }
-
             public void Dispose()
             {
                 totalStopwatch.Stop();
-                if (totalStopwatch.ElapsedMilliseconds < PerfLogThresholdMs && !budgetExceeded)
+                if (WriteRequestedProfileMessageIfNeeded())
+                {
+                    return;
+                }
+
+                if (totalStopwatch.ElapsedMilliseconds < PerfLogThresholdMs)
                 {
                     return;
                 }
@@ -5293,7 +5520,7 @@ namespace InlineCppVarDbg
                     .Take(8)
                     .ToList();
 
-                if (topEntries.Count == 0 && !budgetExceeded)
+                if (topEntries.Count == 0)
                 {
                     return;
                 }
@@ -5301,15 +5528,7 @@ namespace InlineCppVarDbg
                 var builder = new StringBuilder(512);
                 builder.Append("InlineCppVarDbg PERF total=");
                 builder.Append(totalStopwatch.ElapsedMilliseconds);
-                builder.Append("ms / budget=");
-                builder.Append(Policy.HardBudgetMs);
                 builder.Append("ms");
-                if (budgetExceeded)
-                {
-                    builder.Append(" [BUDGET EXCEEDED]");
-                }
-                builder.Append(", mode=");
-                builder.Append(Policy.IsEmergencyMode ? "Emergency" : "Fast");
                 builder.Append(", dbgVer=");
                 builder.Append(debuggerVersion);
                 builder.Append(", file=");
@@ -5345,6 +5564,61 @@ namespace InlineCppVarDbg
                 WritePerfMessage(message);
             }
 
+            private bool WriteRequestedProfileMessageIfNeeded()
+            {
+                if (profileRequestKind == DebuggerBridge.ProfileRequestKind.None ||
+                    totalStopwatch.ElapsedMilliseconds < RequestedProfileLogThresholdMs)
+                {
+                    return false;
+                }
+
+                var orderedEntries = entries
+                    .OrderByDescending(pair => pair.Value.TotalMs)
+                    .ThenByDescending(pair => pair.Value.MaxMs)
+                    .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+                    .ToList();
+
+                var builder = new StringBuilder(Math.Max(1024, 96 + (orderedEntries.Count * 80)));
+                builder.Append("InlineCppVarDbg PROFILE request=");
+                builder.Append(GetProfileRequestLabel(profileRequestKind));
+                builder.Append(", total=");
+                builder.Append(totalStopwatch.ElapsedMilliseconds);
+                builder.Append("ms, dbgVer=");
+                builder.Append(debuggerVersion);
+                builder.Append(", file=");
+                builder.Append(System.IO.Path.GetFileName(filePath));
+                builder.Append(':');
+                builder.Append(lineNumber);
+
+                if (orderedEntries.Count == 0)
+                {
+                    builder.AppendLine();
+                    builder.Append("  <no profiling entries recorded>");
+                }
+                else
+                {
+                    foreach (KeyValuePair<string, PerfEntry> pair in orderedEntries)
+                    {
+                        builder.AppendLine();
+                        builder.Append("  ");
+                        builder.Append(pair.Key);
+                        builder.Append(" total=");
+                        builder.Append(pair.Value.TotalMs);
+                        builder.Append("ms max=");
+                        builder.Append(pair.Value.MaxMs);
+                        builder.Append("ms n=");
+                        builder.Append(pair.Value.Count);
+                    }
+                }
+
+                string message = builder.ToString();
+                System.Diagnostics.Debug.WriteLine(message);
+                System.Diagnostics.Trace.WriteLine(message);
+                ThreadHelper.ThrowIfNotOnUIThread();
+                WritePerfMessage(message);
+                return true;
+            }
+
             private static string NormalizeSubject(string subject)
             {
                 if (string.IsNullOrWhiteSpace(subject))
@@ -5372,32 +5646,23 @@ namespace InlineCppVarDbg
         private readonly struct EvaluationPolicy
         {
             public EvaluationPolicy(
-                bool isEmergencyMode,
                 int previousLineCount,
-                int hardBudgetMs,
                 int perExpressionTimeoutMs,
-                bool allowGetterCalls,
                 bool allowFallbackExpressions,
                 bool allowDataMemberRecursion,
                 bool allowArrayProbing,
                 bool allowCharProbing)
             {
-                IsEmergencyMode = isEmergencyMode;
                 PreviousLineCount = previousLineCount;
-                HardBudgetMs = hardBudgetMs;
                 PerExpressionTimeoutMs = perExpressionTimeoutMs;
-                AllowGetterCalls = allowGetterCalls;
                 AllowFallbackExpressions = allowFallbackExpressions;
                 AllowDataMemberRecursion = allowDataMemberRecursion;
                 AllowArrayProbing = allowArrayProbing;
                 AllowCharProbing = allowCharProbing;
             }
 
-            public bool IsEmergencyMode { get; }
             public int PreviousLineCount { get; }
-            public int HardBudgetMs { get; }
             public int PerExpressionTimeoutMs { get; }
-            public bool AllowGetterCalls { get; }
             public bool AllowFallbackExpressions { get; }
             public bool AllowDataMemberRecursion { get; }
             public bool AllowArrayProbing { get; }
