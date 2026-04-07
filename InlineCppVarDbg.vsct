@@ -70,6 +70,16 @@
           <ToolTipText>Manually show all eligible variable values in the current function for this break state, even if it is slower.</ToolTipText>
         </Strings>
       </Button>
+
+      <Button guid="guidInlineCppVarDbgCmdSet" id="cmdidOpenQuickConfig" priority="0x0150" type="Button">
+        <Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgToolbarGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>CFG</ButtonText>
+          <MenuText>Open Quick Config</MenuText>
+          <ToolTipText>Open the Inline Cpp Var Dbg options page.</ToolTipText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -79,6 +89,7 @@
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidToggleNumericDisplayModeHex" priority="0x0120"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateGetterValuesInFunction" priority="0x0130"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateAllValuesInFunction" priority="0x0140"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
+    <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidOpenQuickConfig" priority="0x0150"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
   </CommandPlacements>
 
   <Symbols>
@@ -92,6 +103,7 @@
       <IDSymbol name="cmdidToggleNumericDisplayModeHex" value="0x0102" />
       <IDSymbol name="cmdidEvaluateGetterValuesInFunction" value="0x0103" />
       <IDSymbol name="cmdidEvaluateAllValuesInFunction" value="0x0104" />
+      <IDSymbol name="cmdidOpenQuickConfig" value="0x0105" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

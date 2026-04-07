@@ -63,6 +63,7 @@
     </Compile>
     <Compile Include="InlineValuesServiceLocator.cs" />
     <Compile Include="InlineValuesSettings.cs" />
+    <Compile Include="OpenQuickConfigCommand.cs" />
     <Compile Include="ToggleInlineValuesCommand.cs" />
     <Compile Include="ToggleNumericDisplayModeCommand.cs" />
     <Compile Include="ToggleValueDisplayModeCommand.cs" />

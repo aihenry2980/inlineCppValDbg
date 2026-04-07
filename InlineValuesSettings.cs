@@ -19,6 +19,8 @@ namespace InlineCppVarDbg
         public const string EvaluationKindsPropertyName = "EvaluationKinds";
         public const string RuleKindsPropertyName = "RuleKinds";
         public const string TypeRuleKindsPropertyName = "TypeRuleKinds";
+        public const string DetailedPointerTypeRulesMigratedPropertyName = "DetailedPointerTypeRulesMigrated";
+        public const string DetailedArrayTypeRulesMigratedPropertyName = "DetailedArrayTypeRulesMigrated";
         public const string CustomRulesPropertyName = "CustomRules";
         private const int DefaultPreviousLineCount = 20;
         private const InlineValueDisplayMode DefaultDisplayMode = InlineValueDisplayMode.Inline;
@@ -45,7 +47,14 @@ namespace InlineCppVarDbg
             InlineValueTypeRuleKinds.IntegralArrays |
             InlineValueTypeRuleKinds.FloatingPointArrays |
             InlineValueTypeRuleKinds.EnumArrays |
-            InlineValueTypeRuleKinds.IntegralPointers;
+            InlineValueTypeRuleKinds.SignedCharArrays |
+            InlineValueTypeRuleKinds.UnsignedCharArrays |
+            InlineValueTypeRuleKinds.SignedIntegralArrays |
+            InlineValueTypeRuleKinds.UnsignedIntegralArrays |
+            InlineValueTypeRuleKinds.IntegralPointers |
+            InlineValueTypeRuleKinds.Unsigned8BitPointers |
+            InlineValueTypeRuleKinds.Unsigned16BitPointers |
+            InlineValueTypeRuleKinds.Unsigned32BitPointers;
         private const int MaxPreviousLineCount = 200;
         private const string DefaultValueBackgroundColor = "#E5E5E5";
         private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
@@ -94,6 +103,8 @@ namespace InlineCppVarDbg
             evaluationKinds = ReadEvaluationKindsOrDefault();
             ruleKinds = ReadRuleKindsOrDefault();
             typeRuleKinds = ReadTypeRuleKindsOrDefault();
+            typeRuleKinds = MigrateDetailedArrayTypeRulesIfNeeded(typeRuleKinds);
+            typeRuleKinds = MigrateDetailedPointerTypeRulesIfNeeded(typeRuleKinds);
             customRulesText = ReadCustomRulesOrDefault();
             customRules = InlineValueCustomRuleParser.Parse(customRulesText);
         }
@@ -794,6 +805,81 @@ namespace InlineCppVarDbg
         private void PersistTypeRuleKinds(InlineValueTypeRuleKinds kinds)
         {
             store.SetInt32(CollectionPath, TypeRuleKindsPropertyName, (int)NormalizeTypeRuleKinds(kinds));
+        }
+
+        private InlineValueTypeRuleKinds MigrateDetailedPointerTypeRulesIfNeeded(InlineValueTypeRuleKinds kinds)
+        {
+            bool alreadyMigrated = false;
+            if (store.PropertyExists(CollectionPath, DetailedPointerTypeRulesMigratedPropertyName))
+            {
+                try
+                {
+                    alreadyMigrated = store.GetBoolean(CollectionPath, DetailedPointerTypeRulesMigratedPropertyName);
+                }
+                catch
+                {
+                    alreadyMigrated = false;
+                }
+            }
+
+            if (alreadyMigrated)
+            {
+                return kinds;
+            }
+
+            InlineValueTypeRuleKinds migratedKinds = kinds;
+            if ((kinds & InlineValueTypeRuleKinds.IntegralPointers) == InlineValueTypeRuleKinds.IntegralPointers)
+            {
+                migratedKinds |= InlineValueTypeRuleKinds.Unsigned8BitPointers |
+                                 InlineValueTypeRuleKinds.Unsigned16BitPointers |
+                                 InlineValueTypeRuleKinds.Unsigned32BitPointers;
+                PersistTypeRuleKinds(migratedKinds);
+            }
+
+            store.SetBoolean(CollectionPath, DetailedPointerTypeRulesMigratedPropertyName, true);
+            return migratedKinds;
+        }
+
+        private InlineValueTypeRuleKinds MigrateDetailedArrayTypeRulesIfNeeded(InlineValueTypeRuleKinds kinds)
+        {
+            bool alreadyMigrated = false;
+            if (store.PropertyExists(CollectionPath, DetailedArrayTypeRulesMigratedPropertyName))
+            {
+                try
+                {
+                    alreadyMigrated = store.GetBoolean(CollectionPath, DetailedArrayTypeRulesMigratedPropertyName);
+                }
+                catch
+                {
+                    alreadyMigrated = false;
+                }
+            }
+
+            if (alreadyMigrated)
+            {
+                return kinds;
+            }
+
+            InlineValueTypeRuleKinds migratedKinds = kinds;
+            if ((kinds & InlineValueTypeRuleKinds.CharacterArrays) == InlineValueTypeRuleKinds.CharacterArrays)
+            {
+                migratedKinds |= InlineValueTypeRuleKinds.SignedCharArrays |
+                                 InlineValueTypeRuleKinds.UnsignedCharArrays;
+            }
+
+            if ((kinds & InlineValueTypeRuleKinds.IntegralArrays) == InlineValueTypeRuleKinds.IntegralArrays)
+            {
+                migratedKinds |= InlineValueTypeRuleKinds.SignedIntegralArrays |
+                                 InlineValueTypeRuleKinds.UnsignedIntegralArrays;
+            }
+
+            if (migratedKinds != kinds)
+            {
+                PersistTypeRuleKinds(migratedKinds);
+            }
+
+            store.SetBoolean(CollectionPath, DetailedArrayTypeRulesMigratedPropertyName, true);
+            return migratedKinds;
         }
 
         private void PersistCustomRules(string text)

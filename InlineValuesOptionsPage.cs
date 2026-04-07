@@ -26,7 +26,14 @@ namespace InlineCppVarDbg
             InlineValueTypeRuleKinds.IntegralArrays |
             InlineValueTypeRuleKinds.FloatingPointArrays |
             InlineValueTypeRuleKinds.EnumArrays |
-            InlineValueTypeRuleKinds.IntegralPointers;
+            InlineValueTypeRuleKinds.SignedCharArrays |
+            InlineValueTypeRuleKinds.UnsignedCharArrays |
+            InlineValueTypeRuleKinds.SignedIntegralArrays |
+            InlineValueTypeRuleKinds.UnsignedIntegralArrays |
+            InlineValueTypeRuleKinds.IntegralPointers |
+            InlineValueTypeRuleKinds.Unsigned8BitPointers |
+            InlineValueTypeRuleKinds.Unsigned16BitPointers |
+            InlineValueTypeRuleKinds.Unsigned32BitPointers;
         private int previousLineCount = DefaultPreviousLineCount;
         private InlineValueDisplayMode displayMode = DefaultDisplayMode;
         private Color valueBackgroundColor = ParseHexColor(DefaultValueBackgroundColor, DefaultValueBackgroundColor);
@@ -267,12 +274,48 @@ namespace InlineCppVarDbg
         }
 
         [Category("Detailed Type Rules")]
+        [DisplayName("Signed char arrays")]
+        [Description("Show signed char[] and int8_t[] arrays. Applies only when Array values and Char/string arrays are enabled.")]
+        public bool ShowSignedCharArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.SignedCharArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.SignedCharArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Unsigned char arrays")]
+        [Description("Show unsigned char[] and uint8_t[] arrays. Applies only when Array values and Char/string arrays are enabled.")]
+        public bool ShowUnsignedCharArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.UnsignedCharArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.UnsignedCharArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
         [DisplayName("Integral arrays")]
         [Description("Show arrays of integral element types such as int[] or size_t[]. Applies only when Array values is enabled.")]
         public bool ShowIntegralArrays
         {
             get => HasTypeRuleKind(InlineValueTypeRuleKinds.IntegralArrays);
             set => SetTypeRuleKind(InlineValueTypeRuleKinds.IntegralArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Signed integral arrays")]
+        [Description("Show signed integral arrays such as int[], short[], and long[]. Applies only when Array values and Integral arrays are enabled.")]
+        public bool ShowSignedIntegralArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.SignedIntegralArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.SignedIntegralArrays, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("Unsigned integral arrays")]
+        [Description("Show unsigned integral arrays such as unsigned int[], uint32_t[], and size_t[]. Applies only when Array values and Integral arrays are enabled.")]
+        public bool ShowUnsignedIntegralArrays
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.UnsignedIntegralArrays);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.UnsignedIntegralArrays, value);
         }
 
         [Category("Detailed Type Rules")]
@@ -318,6 +361,33 @@ namespace InlineCppVarDbg
         {
             get => HasTypeRuleKind(InlineValueTypeRuleKinds.IntegralPointers);
             set => SetTypeRuleKind(InlineValueTypeRuleKinds.IntegralPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("uint8* pointers")]
+        [Description("Show uint8* and uint8_t* values as address plus dereferenced byte value. Applies only when Basic scalar values and Integral pointer master switch are enabled.")]
+        public bool ShowUnsigned8BitPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.Unsigned8BitPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.Unsigned8BitPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("uint16* pointers")]
+        [Description("Show uint16* and uint16_t* values as address plus dereferenced 16-bit value. Applies only when Basic scalar values and Integral pointer master switch are enabled.")]
+        public bool ShowUnsigned16BitPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.Unsigned16BitPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.Unsigned16BitPointers, value);
+        }
+
+        [Category("Detailed Type Rules")]
+        [DisplayName("uint32* pointers")]
+        [Description("Show uint32* and uint32_t* values as address plus dereferenced 32-bit value. Applies only when Basic scalar values and Integral pointer master switch are enabled.")]
+        public bool ShowUnsigned32BitPointers
+        {
+            get => HasTypeRuleKind(InlineValueTypeRuleKinds.Unsigned32BitPointers);
+            set => SetTypeRuleKind(InlineValueTypeRuleKinds.Unsigned32BitPointers, value);
         }
 
         [Category("Detailed Type Rules")]

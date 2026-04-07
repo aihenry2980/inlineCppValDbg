@@ -23,6 +23,7 @@ namespace InlineCppVarDbg
             await ToggleNumericDisplayModeCommand.InitializeAsync(this);
             await EvaluateGetterValuesInFunctionCommand.InitializeAsync(this);
             await EvaluateAllValuesInFunctionCommand.InitializeAsync(this);
+            await OpenQuickConfigCommand.InitializeAsync(this);
         }
     }
 }

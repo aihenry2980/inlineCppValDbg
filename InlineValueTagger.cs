@@ -42,7 +42,11 @@ namespace InlineCppVarDbg
         private static readonly HashSet<string> PrimitiveTypeTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int", "long",
-            "float", "double", "void", "__int8", "__int16", "__int32", "__int64", "size_t", "ptrdiff_t"
+            "float", "double", "void", "__int8", "__int16", "__int32", "__int64",
+            "int8_t", "int16_t", "int32_t", "int64_t",
+            "uint8", "uint16", "uint32", "uint64",
+            "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+            "size_t", "ptrdiff_t"
         };
 
         private static readonly HashSet<string> TypeNoiseTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -1370,6 +1374,7 @@ namespace InlineCppVarDbg
                    ContainsTypeWord(lower, "__int16") ||
                    ContainsTypeWord(lower, "__int32") ||
                    ContainsTypeWord(lower, "__int64") ||
+                   IsExplicitFixedWidthIntegralType(lower) ||
                    ContainsTypeWord(lower, "size_t") ||
                    ContainsTypeWord(lower, "ptrdiff_t");
         }
@@ -1490,12 +1495,34 @@ namespace InlineCppVarDbg
                            ContainsTypeWord(lower, "__int16") ||
                            ContainsTypeWord(lower, "__int32") ||
                            ContainsTypeWord(lower, "__int64") ||
+                           IsExplicitFixedWidthIntegralType(lower) ||
                            ContainsTypeWord(lower, "size_t") ||
                            ContainsTypeWord(lower, "ptrdiff_t");
                 }
             }
 
             return false;
+        }
+
+        private static bool IsExplicitFixedWidthIntegralType(string typeLower)
+        {
+            if (string.IsNullOrWhiteSpace(typeLower))
+            {
+                return false;
+            }
+
+            return ContainsTypeWord(typeLower, "int8_t") ||
+                   ContainsTypeWord(typeLower, "int16_t") ||
+                   ContainsTypeWord(typeLower, "int32_t") ||
+                   ContainsTypeWord(typeLower, "int64_t") ||
+                   ContainsTypeWord(typeLower, "uint8") ||
+                   ContainsTypeWord(typeLower, "uint16") ||
+                   ContainsTypeWord(typeLower, "uint32") ||
+                   ContainsTypeWord(typeLower, "uint64") ||
+                   ContainsTypeWord(typeLower, "uint8_t") ||
+                   ContainsTypeWord(typeLower, "uint16_t") ||
+                   ContainsTypeWord(typeLower, "uint32_t") ||
+                   ContainsTypeWord(typeLower, "uint64_t");
         }
 
         private static bool LooksLikeEnumSymbolValue(string rawValue, string normalizedValue)
@@ -1612,8 +1639,7 @@ namespace InlineCppVarDbg
             {
                 InlineValueTypeRuleKinds arrayRuleKind = GetArrayTypeRuleKind(type, rawValue, normalizedValue);
                 if (!forceShow &&
-                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays) ||
-                    !HasTypeRuleKind(typeRuleKinds, arrayRuleKind)))
+                    !IsArrayRuleEnabled(arrayRuleKind, evaluationKinds, typeRuleKinds))
                 {
                     return false;
                 }
@@ -1729,8 +1755,7 @@ namespace InlineCppVarDbg
             {
                 InlineValueTypeRuleKinds arrayRuleKind = GetArrayTypeRuleKind(type, rawValue, normalizedValue);
                 return !forceShow &&
-                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays) ||
-                    !HasTypeRuleKind(typeRuleKinds, arrayRuleKind));
+                    !IsArrayRuleEnabled(arrayRuleKind, evaluationKinds, typeRuleKinds);
             }
 
             if (IsDisplayableEnumType(type, null, normalizedValue))
@@ -1830,6 +1855,16 @@ namespace InlineCppVarDbg
                 return InlineValueTypeRuleKinds.BooleanArrays;
             }
 
+            if (IsSignedCharArrayElementType(elementType))
+            {
+                return InlineValueTypeRuleKinds.SignedCharArrays;
+            }
+
+            if (IsUnsignedCharArrayElementType(elementType))
+            {
+                return InlineValueTypeRuleKinds.UnsignedCharArrays;
+            }
+
             if (IsCharacterScalarType(elementType))
             {
                 return InlineValueTypeRuleKinds.CharacterArrays;
@@ -1838,6 +1873,16 @@ namespace InlineCppVarDbg
             if (IsFloatingPointScalarType(elementType))
             {
                 return InlineValueTypeRuleKinds.FloatingPointArrays;
+            }
+
+            if (IsUnsignedIntegralArrayElementType(elementType))
+            {
+                return InlineValueTypeRuleKinds.UnsignedIntegralArrays;
+            }
+
+            if (IsSignedIntegralArrayElementType(elementType))
+            {
+                return InlineValueTypeRuleKinds.SignedIntegralArrays;
             }
 
             if (IsIntegralScalarType(elementType))
@@ -1853,6 +1898,31 @@ namespace InlineCppVarDbg
             return InlineValueTypeRuleKinds.None;
         }
 
+        private static bool IsArrayRuleEnabled(
+            InlineValueTypeRuleKinds arrayRuleKind,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueTypeRuleKinds typeRuleKinds)
+        {
+            if (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Arrays))
+            {
+                return false;
+            }
+
+            switch (arrayRuleKind)
+            {
+                case InlineValueTypeRuleKinds.SignedCharArrays:
+                case InlineValueTypeRuleKinds.UnsignedCharArrays:
+                    return HasTypeRuleKind(typeRuleKinds, InlineValueTypeRuleKinds.CharacterArrays) &&
+                           HasTypeRuleKind(typeRuleKinds, arrayRuleKind);
+                case InlineValueTypeRuleKinds.SignedIntegralArrays:
+                case InlineValueTypeRuleKinds.UnsignedIntegralArrays:
+                    return HasTypeRuleKind(typeRuleKinds, InlineValueTypeRuleKinds.IntegralArrays) &&
+                           HasTypeRuleKind(typeRuleKinds, arrayRuleKind);
+                default:
+                    return HasTypeRuleKind(typeRuleKinds, arrayRuleKind);
+            }
+        }
+
         private static InlineValueTypeRuleKinds GetPointerTypeRuleKind(string type, string rawValue, string normalizedValue)
         {
             if (!IsPointerType(type) || IsFunctionPointerType(type))
@@ -1860,12 +1930,27 @@ namespace InlineCppVarDbg
                 return InlineValueTypeRuleKinds.None;
             }
 
+            string elementType = ExtractPointerElementType(type);
+            if (IsExplicitUnsignedPointerType(elementType, 8))
+            {
+                return InlineValueTypeRuleKinds.Unsigned8BitPointers;
+            }
+
+            if (IsExplicitUnsignedPointerType(elementType, 16))
+            {
+                return InlineValueTypeRuleKinds.Unsigned16BitPointers;
+            }
+
+            if (IsExplicitUnsignedPointerType(elementType, 32))
+            {
+                return InlineValueTypeRuleKinds.Unsigned32BitPointers;
+            }
+
             if (IsCharPointerOrArrayType(type) || LooksLikeStringPointerOrArray(type, rawValue, normalizedValue))
             {
                 return InlineValueTypeRuleKinds.CharacterPointers;
             }
 
-            string elementType = ExtractPointerElementType(type);
             if (IsBooleanScalarType(elementType))
             {
                 return InlineValueTypeRuleKinds.BooleanPointers;
@@ -1908,6 +1993,9 @@ namespace InlineCppVarDbg
             switch (pointerRuleKind)
             {
                 case InlineValueTypeRuleKinds.IntegralPointers:
+                case InlineValueTypeRuleKinds.Unsigned8BitPointers:
+                case InlineValueTypeRuleKinds.Unsigned16BitPointers:
+                case InlineValueTypeRuleKinds.Unsigned32BitPointers:
                     return HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) &&
                            HasRuleKind(ruleKinds, InlineValueRuleKinds.IntegralPointers);
                 case InlineValueTypeRuleKinds.BooleanPointers:
@@ -1934,6 +2022,68 @@ namespace InlineCppVarDbg
             return pointerRuleKind == InlineValueTypeRuleKinds.None
                 ? allowUnknownKinds
                 : HasTypeRuleKind(typeRuleKinds, pointerRuleKind);
+        }
+
+        private static bool IsSignedCharArrayElementType(string elementType)
+        {
+            if (string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            string lower = elementType.ToLowerInvariant();
+            return (ContainsTypeWord(lower, "signed") && ContainsTypeWord(lower, "char")) ||
+                   ContainsTypeWord(lower, "int8_t");
+        }
+
+        private static bool IsUnsignedCharArrayElementType(string elementType)
+        {
+            if (string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            string lower = elementType.ToLowerInvariant();
+            return (ContainsTypeWord(lower, "unsigned") && ContainsTypeWord(lower, "char")) ||
+                   ContainsTypeWord(lower, "uint8") ||
+                   ContainsTypeWord(lower, "uint8_t") ||
+                   ContainsTypeWord(lower, "byte");
+        }
+
+        private static bool IsUnsignedIntegralArrayElementType(string elementType)
+        {
+            if (!IsIntegralScalarType(elementType) || string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            if (IsSignedCharArrayElementType(elementType) || IsUnsignedCharArrayElementType(elementType))
+            {
+                return false;
+            }
+
+            string lower = elementType.ToLowerInvariant();
+            return ContainsTypeWord(lower, "unsigned") ||
+                   ContainsTypeWord(lower, "uint") ||
+                   ContainsTypeWord(lower, "size_t") ||
+                   ContainsTypeWord(lower, "byte") ||
+                   ContainsTypeWord(lower, "word") ||
+                   ContainsTypeWord(lower, "dword");
+        }
+
+        private static bool IsSignedIntegralArrayElementType(string elementType)
+        {
+            if (!IsIntegralScalarType(elementType) || string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            if (IsSignedCharArrayElementType(elementType) || IsUnsignedCharArrayElementType(elementType))
+            {
+                return false;
+            }
+
+            return !IsUnsignedIntegralArrayElementType(elementType);
         }
 
         private static bool IsArrayType(string type)
@@ -1965,6 +2115,41 @@ namespace InlineCppVarDbg
             }
 
             return type.Substring(0, pointerIndex).Trim();
+        }
+
+        private static bool IsExplicitUnsignedPointerType(string elementType, int bitWidth)
+        {
+            if (string.IsNullOrWhiteSpace(elementType))
+            {
+                return false;
+            }
+
+            string lower = elementType.ToLowerInvariant();
+            switch (bitWidth)
+            {
+                case 8:
+                    return ContainsTypeWord(lower, "uint8") ||
+                           ContainsTypeWord(lower, "uint8_t") ||
+                           ContainsTypeWord(lower, "byte") ||
+                           (ContainsTypeWord(lower, "unsigned") &&
+                            (ContainsTypeWord(lower, "char") || ContainsTypeWord(lower, "__int8")));
+                case 16:
+                    return ContainsTypeWord(lower, "uint16") ||
+                           ContainsTypeWord(lower, "uint16_t") ||
+                           ContainsTypeWord(lower, "word") ||
+                           (ContainsTypeWord(lower, "unsigned") &&
+                            (ContainsTypeWord(lower, "short") || ContainsTypeWord(lower, "__int16")));
+                case 32:
+                    return ContainsTypeWord(lower, "uint32") ||
+                           ContainsTypeWord(lower, "uint32_t") ||
+                           ContainsTypeWord(lower, "dword") ||
+                           (ContainsTypeWord(lower, "unsigned") &&
+                            (ContainsTypeWord(lower, "int") ||
+                             ContainsTypeWord(lower, "long") ||
+                             ContainsTypeWord(lower, "__int32")));
+                default:
+                    return false;
+            }
         }
 
         private static bool IsDisplayableIntegralPointerType(string type)
@@ -4173,6 +4358,11 @@ namespace InlineCppVarDbg
                 return false;
             }
 
+            if (ContainsIndexedExpressionSideEffects(indexText))
+            {
+                return false;
+            }
+
             string expressionText = RemoveWhitespace(lineText.Substring(token.Start, closeBracketIndex - token.Start + 1).Trim());
             if (string.IsNullOrEmpty(expressionText))
             {
@@ -4187,6 +4377,54 @@ namespace InlineCppVarDbg
                 closeBracketIndex + 1,
                 InlineValueEvaluationKinds.IndexedExpressions);
             return true;
+        }
+
+        private static bool ContainsIndexedExpressionSideEffects(string expressionText)
+        {
+            if (string.IsNullOrWhiteSpace(expressionText))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < expressionText.Length; i++)
+            {
+                char ch = expressionText[i];
+                if (ch == '"' || ch == '\'')
+                {
+                    i = SkipQuotedLiteral(expressionText, i) - 1;
+                    continue;
+                }
+
+                if (ch == '+' || ch == '-')
+                {
+                    if (i + 1 < expressionText.Length && expressionText[i + 1] == ch)
+                    {
+                        return true;
+                    }
+
+                    continue;
+                }
+
+                if (ch == '=')
+                {
+                    char prev = i > 0 ? expressionText[i - 1] : '\0';
+                    char next = i + 1 < expressionText.Length ? expressionText[i + 1] : '\0';
+                    bool isComparison =
+                        prev == '=' ||
+                        prev == '!' ||
+                        prev == '<' ||
+                        prev == '>' ||
+                        next == '=';
+                    if (!isComparison)
+                    {
+                        return true;
+                    }
+
+                    continue;
+                }
+            }
+
+            return false;
         }
 
         private static bool TryFindMatchingParen(string lineText, int openParenIndex, out int closeParenIndex)
@@ -4295,21 +4533,107 @@ namespace InlineCppVarDbg
                     leftEnd--;
                 }
 
-                if (leftEnd < 0 || !IsWordChar(lineText[leftEnd]))
+                if (!TryFindReceiverExpressionStart(lineText, leftEnd, out int leftStart))
                 {
                     break;
                 }
 
-                int leftStart = leftEnd;
-                while (leftStart >= 0 && IsWordChar(lineText[leftStart]))
-                {
-                    leftStart--;
-                }
-
-                start = leftStart + 1;
+                start = leftStart;
             }
 
             return start;
+        }
+
+        private static bool TryFindReceiverExpressionStart(string lineText, int receiverEnd, out int receiverStart)
+        {
+            receiverStart = -1;
+            int index = SkipWhitespaceBackward(lineText, receiverEnd);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            while (index >= 0)
+            {
+                char ch = lineText[index];
+                if (IsWordChar(ch))
+                {
+                    int wordStart = index;
+                    while (wordStart >= 0 && IsWordChar(lineText[wordStart]))
+                    {
+                        wordStart--;
+                    }
+
+                    receiverStart = wordStart + 1;
+                    index = SkipWhitespaceBackward(lineText, receiverStart - 1);
+                    continue;
+                }
+
+                if (ch == ']')
+                {
+                    if (!TryFindMatchingPairBackward(lineText, index, '[', ']', out int openBracketIndex))
+                    {
+                        return false;
+                    }
+
+                    receiverStart = openBracketIndex;
+                    index = SkipWhitespaceBackward(lineText, openBracketIndex - 1);
+                    continue;
+                }
+
+                if (ch == ')')
+                {
+                    if (!TryFindMatchingPairBackward(lineText, index, '(', ')', out int openParenIndex))
+                    {
+                        return false;
+                    }
+
+                    int beforeParen = SkipWhitespaceBackward(lineText, openParenIndex - 1);
+                    if (beforeParen >= 0 &&
+                        (IsWordChar(lineText[beforeParen]) || lineText[beforeParen] == ']' || lineText[beforeParen] == ')'))
+                    {
+                        return false;
+                    }
+
+                    receiverStart = openParenIndex;
+                    index = SkipWhitespaceBackward(lineText, openParenIndex - 1);
+                    continue;
+                }
+
+                break;
+            }
+
+            return receiverStart >= 0;
+        }
+
+        private static bool TryFindMatchingPairBackward(string text, int closeIndex, char openChar, char closeChar, out int openIndex)
+        {
+            openIndex = -1;
+            if (string.IsNullOrEmpty(text) || closeIndex < 0 || closeIndex >= text.Length || text[closeIndex] != closeChar)
+            {
+                return false;
+            }
+
+            int depth = 0;
+            for (int index = closeIndex; index >= 0; index--)
+            {
+                char ch = text[index];
+                if (ch == closeChar)
+                {
+                    depth++;
+                }
+                else if (ch == openChar)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        openIndex = index;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static bool IsLikelyFunctionInvocation(string lineText, CppCurrentLineTokenizer.IdentifierToken token)
@@ -4823,6 +5147,17 @@ namespace InlineCppVarDbg
             while (index < text.Length && char.IsWhiteSpace(text[index]))
             {
                 index++;
+            }
+
+            return index;
+        }
+
+        private static int SkipWhitespaceBackward(string text, int startIndex)
+        {
+            int index = startIndex;
+            while (index >= 0 && char.IsWhiteSpace(text[index]))
+            {
+                index--;
             }
 
             return index;
