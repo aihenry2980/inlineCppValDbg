@@ -278,6 +278,7 @@ namespace InlineCppVarDbg
             var tokensByLine = new List<LineTokens>();
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
             var allGetterCalls = new List<GetterCallToken>();
+            var allMemberAccesses = new List<GetterCallToken>();
             for (int lineIndex = coveredStartLineNumber; lineIndex <= coveredEndLineNumber; lineIndex++)
             {
                 ITextSnapshotLine line = snapshot.GetLineFromLineNumber(lineIndex);
@@ -295,6 +296,7 @@ namespace InlineCppVarDbg
                     : new List<CppCurrentLineTokenizer.IdentifierToken>();
                 var tokens = new List<CppCurrentLineTokenizer.IdentifierToken>(scanRegularTokens ? rawTokens.Count : 0);
                 var getterCalls = new List<GetterCallToken>();
+                var memberAccesses = new List<GetterCallToken>();
                 foreach (CppCurrentLineTokenizer.IdentifierToken token in rawTokens)
                 {
                     if (scanGetterTokens &&
@@ -322,6 +324,17 @@ namespace InlineCppVarDbg
                         continue;
                     }
 
+                    if (TryParseMemberAccessExpression(lineText, token, out GetterCallToken memberAccess))
+                    {
+                        memberAccesses.Add(memberAccess);
+                        continue;
+                    }
+
+                    if (HasMemberAccessOperatorBeforeToken(lineText, token.Start))
+                    {
+                        continue;
+                    }
+
                     if (IsPointerReceiverForGetterCall(lineText, token))
                     {
                         continue;
@@ -335,12 +348,13 @@ namespace InlineCppVarDbg
                     tokens.Add(token);
                 }
 
-                tokensByLine.Add(new LineTokens(line, tokens, getterCalls));
+                tokensByLine.Add(new LineTokens(line, tokens, getterCalls, memberAccesses));
                 allTokens.AddRange(tokens);
                 allGetterCalls.AddRange(getterCalls);
+                allMemberAccesses.AddRange(memberAccesses);
             }
 
-            if (allTokens.Count == 0 && allGetterCalls.Count == 0 && parameterNames.Count == 0)
+            if (allTokens.Count == 0 && allGetterCalls.Count == 0 && allMemberAccesses.Count == 0 && parameterNames.Count == 0)
             {
                 ITextSnapshotLine startLine = snapshot.GetLineFromLineNumber(coveredStartLineNumber);
                 ITextSnapshotLine endLine = snapshot.GetLineFromLineNumber(coveredEndLineNumber);
@@ -351,6 +365,7 @@ namespace InlineCppVarDbg
 
             Dictionary<string, string> valueMap;
             Dictionary<string, string> getterValueMap;
+            Dictionary<string, string> memberAccessValueMap;
             using (PerfSession perfSession = PerfSession.Start(documentPath, lineNumber + 1, debuggerBridge.Version, evaluationPolicy, profileRequestKind))
             {
                 currentPerfSession = perfSession;
@@ -360,6 +375,9 @@ namespace InlineCppVarDbg
                     getterValueMap = allGetterCalls.Count > 0
                         ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterFunctionSweep, manualGetterRequests)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
+                    memberAccessValueMap = allMemberAccesses.Count > 0
+                        ? ResolveExpressionValues(context.Debugger, allMemberAccesses, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules)
+                        : new Dictionary<string, string>(StringComparer.Ordinal);
                 }
                 finally
                 {
@@ -368,6 +386,14 @@ namespace InlineCppVarDbg
             }
 
             foreach (KeyValuePair<string, string> pair in getterValueMap)
+            {
+                if (!valueMap.ContainsKey(pair.Key))
+                {
+                    valueMap[pair.Key] = pair.Value;
+                }
+            }
+
+            foreach (KeyValuePair<string, string> pair in memberAccessValueMap)
             {
                 if (!valueMap.ContainsKey(pair.Key))
                 {
@@ -475,6 +501,53 @@ namespace InlineCppVarDbg
                     }
 
                     latestEntryByIdentifier[getterCall.ExpressionText] = tagEntry;
+                }
+
+                var seenMemberAccessOnLine = new HashSet<string>(StringComparer.Ordinal);
+                foreach (GetterCallToken memberAccess in lineTokens.MemberAccesses)
+                {
+                    if (displayMode == InlineValueDisplayMode.EndOfLine && !seenMemberAccessOnLine.Add(memberAccess.ExpressionText))
+                    {
+                        continue;
+                    }
+
+                    if (!valueMap.TryGetValue(memberAccess.ExpressionText, out string memberValue))
+                    {
+                        continue;
+                    }
+
+                    ValueDisplayKind displayKind = GetDisplayKind(memberValue);
+                    string cleanedMemberValue = StripDisplayMarker(memberValue);
+
+                    int highlightLevel = 0;
+                    if (highlightLevels.TryGetValue(memberAccess.ExpressionText, out int level))
+                    {
+                        highlightLevel = level;
+                    }
+
+                    int insertion;
+                    PositionAffinity affinity;
+                    string displayText;
+                    if (displayMode == InlineValueDisplayMode.EndOfLine)
+                    {
+                        insertion = lineTokens.Line.End.Position;
+                        affinity = PositionAffinity.Predecessor;
+                        displayText = memberAccess.DisplayLabel + ": " + cleanedMemberValue;
+                    }
+                    else
+                    {
+                        insertion = lineTokens.Line.Start.Position + memberAccess.CallEnd;
+                        affinity = PositionAffinity.Successor;
+                        displayText = cleanedMemberValue;
+                    }
+
+                    var tagEntry = new TagEntry(insertion, displayText, highlightLevel, affinity, displayKind);
+                    if (!firstEntryByIdentifier.ContainsKey(memberAccess.ExpressionText))
+                    {
+                        firstEntryByIdentifier[memberAccess.ExpressionText] = tagEntry;
+                    }
+
+                    latestEntryByIdentifier[memberAccess.ExpressionText] = tagEntry;
                 }
             }
 
@@ -754,6 +827,81 @@ namespace InlineCppVarDbg
                     }
 
                     values[getterCall.ExpressionText] = displayValue;
+                }
+                catch (COMException)
+                {
+                }
+            }
+
+            return values;
+        }
+
+        private static Dictionary<string, string> ResolveExpressionValues(
+            Debugger debugger,
+            List<GetterCallToken> expressionTokens,
+            InlineValueNumericDisplayMode numericDisplayMode,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var values = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (ShouldAbortEvaluation())
+            {
+                return values;
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (GetterCallToken expressionToken in expressionTokens)
+            {
+                if (ShouldAbortEvaluation())
+                {
+                    break;
+                }
+
+                if (!seen.Add(expressionToken.ExpressionText))
+                {
+                    continue;
+                }
+
+                if (!HasEvaluationKind(evaluationKinds, expressionToken.EvaluationKind))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    EnvDTE.Expression expression = TimedGetExpression(debugger, expressionToken.EvaluationExpressionText, 50, "Member.GetExpression");
+                    if (expression == null || !expression.IsValidValue)
+                    {
+                        continue;
+                    }
+
+                    string normalized = NormalizeValue(expression.Value);
+                    if (string.IsNullOrEmpty(normalized))
+                    {
+                        continue;
+                    }
+
+                    if (!TryFormatEligibleValue(
+                        debugger,
+                        expressionToken.EvaluationExpressionText,
+                        expression.Type,
+                        expression.Value,
+                        normalized,
+                        numericDisplayMode,
+                        EnumValueRenderMode.IntegerOnly,
+                        evaluationKinds,
+                        ruleKinds,
+                        typeRuleKinds,
+                        customRules,
+                        out string displayValue))
+                    {
+                        continue;
+                    }
+
+                    values[expressionToken.ExpressionText] = displayValue;
                 }
                 catch (COMException)
                 {
@@ -4379,6 +4527,96 @@ namespace InlineCppVarDbg
             return true;
         }
 
+        private static bool TryParseMemberAccessExpression(string lineText, CppCurrentLineTokenizer.IdentifierToken token, out GetterCallToken memberAccess)
+        {
+            memberAccess = default;
+            if (string.IsNullOrEmpty(lineText))
+            {
+                return false;
+            }
+
+            if (!HasMemberAccessOperatorBeforeToken(lineText, token.Start) ||
+                HasMemberAccessContinuationAfterToken(lineText, token.Start + token.Length))
+            {
+                return false;
+            }
+
+            if (IsLikelyFunctionInvocation(lineText, token))
+            {
+                return false;
+            }
+
+            int expressionStart = FindGetterExpressionStart(lineText, token.Start);
+            if (expressionStart < 0 || expressionStart >= token.Start)
+            {
+                return false;
+            }
+
+            string expressionText = RemoveWhitespace(lineText.Substring(expressionStart, token.Start + token.Length - expressionStart).Trim());
+            if (string.IsNullOrEmpty(expressionText) || ContainsIndexedExpressionSideEffects(expressionText))
+            {
+                return false;
+            }
+
+            memberAccess = new GetterCallToken(
+                expressionText,
+                expressionText,
+                expressionText,
+                token.Name,
+                token.Start + token.Length,
+                InlineValueEvaluationKinds.FallbackExpressions);
+            return true;
+        }
+
+        private static bool HasMemberAccessOperatorBeforeToken(string lineText, int tokenStart)
+        {
+            if (string.IsNullOrEmpty(lineText) || tokenStart <= 0)
+            {
+                return false;
+            }
+
+            int index = SkipWhitespaceBackward(lineText, tokenStart - 1);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            if (lineText[index] == '.')
+            {
+                return true;
+            }
+
+            return (index >= 1 && lineText[index] == '>' && lineText[index - 1] == '-') ||
+                   (index >= 1 && lineText[index] == ':' && lineText[index - 1] == ':');
+        }
+
+        private static bool HasMemberAccessContinuationAfterToken(string lineText, int tokenEnd)
+        {
+            if (string.IsNullOrEmpty(lineText) || tokenEnd < 0)
+            {
+                return false;
+            }
+
+            int index = tokenEnd;
+            while (index < lineText.Length && char.IsWhiteSpace(lineText[index]))
+            {
+                index++;
+            }
+
+            if (index >= lineText.Length)
+            {
+                return false;
+            }
+
+            if (lineText[index] == '.')
+            {
+                return true;
+            }
+
+            return (index + 1 < lineText.Length && lineText[index] == '-' && lineText[index + 1] == '>') ||
+                   (index + 1 < lineText.Length && lineText[index] == ':' && lineText[index + 1] == ':');
+        }
+
         private static bool ContainsIndexedExpressionSideEffects(string expressionText)
         {
             if (string.IsNullOrWhiteSpace(expressionText))
@@ -6021,16 +6259,19 @@ namespace InlineCppVarDbg
             public LineTokens(
                 ITextSnapshotLine line,
                 List<CppCurrentLineTokenizer.IdentifierToken> tokens,
-                List<GetterCallToken> getterCalls)
+                List<GetterCallToken> getterCalls,
+                List<GetterCallToken> memberAccesses)
             {
                 Line = line;
                 Tokens = tokens;
                 GetterCalls = getterCalls;
+                MemberAccesses = memberAccesses;
             }
 
             public ITextSnapshotLine Line { get; }
             public List<CppCurrentLineTokenizer.IdentifierToken> Tokens { get; }
             public List<GetterCallToken> GetterCalls { get; }
+            public List<GetterCallToken> MemberAccesses { get; }
         }
 
         private readonly struct InsertionAnchor
