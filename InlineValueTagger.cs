@@ -33,6 +33,7 @@ namespace InlineCppVarDbg
         private const string NullValueMarker = "\u0001N:";
         private const string UninitializedValueMarker = "\u0001U:";
         private static readonly Guid PerfOutputPaneGuid = new Guid("2A09B390-E700-42DE-9A4D-DC37F74B71F2");
+        private static readonly Guid DiagnosticOutputPaneGuid = new Guid("9A73E8B0-1A1A-4F8E-B1C4-3EE4927C4751");
 
         private static readonly HashSet<string> SupportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -274,6 +275,10 @@ namespace InlineCppVarDbg
             DebuggerBridge.ProfileRequestKind profileRequestKind = debuggerBridge.TryConsumeProfileForNextEvaluation(out DebuggerBridge.ProfileRequestKind consumedProfileRequestKind)
                 ? consumedProfileRequestKind
                 : DebuggerBridge.ProfileRequestKind.None;
+            bool logGetterDiagnostics = debuggerBridge.TryConsumeGetterDiagnosticsForNextEvaluation();
+            GetterDiagnosticSession getterDiagnosticSession = logGetterDiagnostics
+                ? new GetterDiagnosticSession(documentPath, lineNumber + 1, manualGetterFunctionSweep ? "GET button" : "manual getter request")
+                : null;
 
             var tokensByLine = new List<LineTokens>();
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
@@ -299,15 +304,31 @@ namespace InlineCppVarDbg
                 var memberAccesses = new List<GetterCallToken>();
                 foreach (CppCurrentLineTokenizer.IdentifierToken token in rawTokens)
                 {
-                    if (scanGetterTokens &&
-                        TryParseGetterCall(lineText, token, out GetterCallToken getterCall) &&
-                        TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall))
+                    if (scanGetterTokens && IsPotentialGetterCallToken(lineText, token))
                     {
-                        bool allowAutomaticGetter = HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls);
-                        bool allowManualGetter = manualGetterFunctionSweep || manualGetterRequests.Contains(boundGetterCall.ExpressionText);
-                        if (allowAutomaticGetter || allowManualGetter)
+                        string getterLabel = BuildGetterDiagnosticLabel(lineText, token);
+                        getterDiagnosticSession?.RecordCandidate(getterLabel);
+
+                        if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out string getterParseFailureReason))
                         {
-                            getterCalls.Add(boundGetterCall);
+                            getterDiagnosticSession?.RecordSkip(getterLabel, getterParseFailureReason);
+                        }
+                        else if (!TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall, out string getterBindFailureReason))
+                        {
+                            getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, getterBindFailureReason);
+                        }
+                        else
+                        {
+                            bool allowAutomaticGetter = HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls);
+                            bool allowManualGetter = manualGetterFunctionSweep || manualGetterRequests.Contains(boundGetterCall.ExpressionText);
+                            if (allowAutomaticGetter || allowManualGetter)
+                            {
+                                getterCalls.Add(boundGetterCall);
+                            }
+                            else
+                            {
+                                getterDiagnosticSession?.RecordSkip(boundGetterCall.ExpressionText, "disabled by current getter evaluation settings");
+                            }
                         }
                     }
 
@@ -373,7 +394,7 @@ namespace InlineCppVarDbg
                 {
                     valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     getterValueMap = allGetterCalls.Count > 0
-                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterFunctionSweep, manualGetterRequests)
+                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterFunctionSweep, manualGetterRequests, getterDiagnosticSession)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
                     memberAccessValueMap = allMemberAccesses.Count > 0
                         ? ResolveExpressionValues(context.Debugger, allMemberAccesses, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules)
@@ -384,6 +405,8 @@ namespace InlineCppVarDbg
                     currentPerfSession = null;
                 }
             }
+
+            getterDiagnosticSession?.WriteSummary();
 
             foreach (KeyValuePair<string, string> pair in getterValueMap)
             {
@@ -760,7 +783,8 @@ namespace InlineCppVarDbg
             InlineValueTypeRuleKinds typeRuleKinds,
             IReadOnlyList<InlineValueCustomRule> customRules,
             bool allowManualGetterFunctionSweep,
-            ISet<string> manualGetterExpressions)
+            ISet<string> manualGetterExpressions,
+            GetterDiagnosticSession getterDiagnosticSession)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -787,6 +811,7 @@ namespace InlineCppVarDbg
                     (manualGetterExpressions != null && manualGetterExpressions.Contains(getterCall.ExpressionText));
                 if (!isManualGetterRequest && !HasEvaluationKind(evaluationKinds, getterCall.EvaluationKind))
                 {
+                    getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "disabled by current getter evaluation settings");
                     continue;
                 }
 
@@ -795,17 +820,20 @@ namespace InlineCppVarDbg
                     EnvDTE.Expression expression = TimedGetExpression(debugger, getterCall.EvaluationExpressionText, 50, "Getter.GetExpression");
                     if (expression == null || !expression.IsValidValue)
                     {
+                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "debugger could not evaluate the bound getter expression");
                         continue;
                     }
 
                     string normalized = NormalizeValue(expression.Value);
                     if (string.IsNullOrEmpty(normalized))
                     {
+                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "debugger returned an empty value");
                         continue;
                     }
 
                     if (!IsDisplayableGetterReturnType(expression.Type, expression.Value, normalized))
                     {
+                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "return type '" + NormalizeTypeForDiagnostic(expression.Type) + "' is not displayable inline");
                         continue;
                     }
 
@@ -823,13 +851,16 @@ namespace InlineCppVarDbg
                         customRules,
                         out string displayValue))
                     {
+                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "filtered by current type or rule settings for return type '" + NormalizeTypeForDiagnostic(expression.Type) + "'");
                         continue;
                     }
 
                     values[getterCall.ExpressionText] = displayValue;
+                    getterDiagnosticSession?.RecordShown(getterCall.ExpressionText);
                 }
-                catch (COMException)
+                catch (COMException ex)
                 {
+                    getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "debugger COM error 0x" + ex.ErrorCode.ToString("X8", CultureInfo.InvariantCulture));
                 }
             }
 
@@ -4424,11 +4455,13 @@ namespace InlineCppVarDbg
             return value;
         }
 
-        private static bool TryParseGetterCall(string lineText, CppCurrentLineTokenizer.IdentifierToken token, out GetterCallToken getterCall)
+        private static bool TryParseGetterCall(string lineText, CppCurrentLineTokenizer.IdentifierToken token, out GetterCallToken getterCall, out string failureReason)
         {
             getterCall = default;
+            failureReason = null;
             if (!IsGetterLikeName(token.Name))
             {
+                failureReason = "name does not start with Get/Is";
                 return false;
             }
 
@@ -4440,29 +4473,34 @@ namespace InlineCppVarDbg
 
             if (openParenIndex >= lineText.Length || lineText[openParenIndex] != '(')
             {
+                failureReason = "not a function call";
                 return false;
             }
 
             if (!TryFindMatchingParen(lineText, openParenIndex, out int closeParenIndex))
             {
+                failureReason = "call parentheses are not balanced";
                 return false;
             }
 
             string argumentsText = lineText.Substring(openParenIndex + 1, closeParenIndex - openParenIndex - 1);
             if (!string.IsNullOrWhiteSpace(argumentsText))
             {
+                failureReason = "getter call has arguments";
                 return false;
             }
 
             int expressionStart = FindGetterExpressionStart(lineText, token.Start);
             if (expressionStart < 0 || expressionStart > token.Start || closeParenIndex < expressionStart)
             {
+                failureReason = "receiver expression could not be parsed";
                 return false;
             }
 
             string expressionText = RemoveWhitespace(lineText.Substring(expressionStart, closeParenIndex - expressionStart + 1).Trim());
             if (string.IsNullOrEmpty(expressionText))
             {
+                failureReason = "getter expression text is empty after parsing";
                 return false;
             }
 
@@ -4946,15 +4984,65 @@ namespace InlineCppVarDbg
                    methodName.StartsWith("is", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool TryBindVisibleDirectReturnGetter(ITextSnapshot snapshot, GetterCallToken getterCall, out GetterCallToken boundGetterCall)
+        private static bool IsPotentialGetterCallToken(string lineText, CppCurrentLineTokenizer.IdentifierToken token)
         {
-            boundGetterCall = getterCall;
-            if (!TryGetVisibleDirectReturnGetterExpression(snapshot, getterCall.MethodName, out string returnExpression))
+            if (string.IsNullOrEmpty(lineText) || !IsGetterLikeName(token.Name))
             {
                 return false;
             }
 
-            if (!TryBuildGetterEvaluationExpression(getterCall.ExpressionText, getterCall.MethodName, returnExpression, out string evaluationExpressionText))
+            int index = token.Start + token.Length;
+            while (index < lineText.Length && char.IsWhiteSpace(lineText[index]))
+            {
+                index++;
+            }
+
+            return index < lineText.Length && lineText[index] == '(';
+        }
+
+        private static string BuildGetterDiagnosticLabel(string lineText, CppCurrentLineTokenizer.IdentifierToken token)
+        {
+            if (string.IsNullOrEmpty(lineText))
+            {
+                return token.Name;
+            }
+
+            int openParenIndex = token.Start + token.Length;
+            while (openParenIndex < lineText.Length && char.IsWhiteSpace(lineText[openParenIndex]))
+            {
+                openParenIndex++;
+            }
+
+            if (openParenIndex >= lineText.Length || lineText[openParenIndex] != '(')
+            {
+                return token.Name;
+            }
+
+            if (!TryFindMatchingParen(lineText, openParenIndex, out int closeParenIndex))
+            {
+                return token.Name;
+            }
+
+            int expressionStart = FindGetterExpressionStart(lineText, token.Start);
+            if (expressionStart < 0 || expressionStart > token.Start)
+            {
+                expressionStart = token.Start;
+            }
+
+            string label = RemoveWhitespace(lineText.Substring(expressionStart, closeParenIndex - expressionStart + 1).Trim());
+            return string.IsNullOrEmpty(label) ? token.Name : label;
+        }
+
+        private static bool TryBindVisibleDirectReturnGetter(ITextSnapshot snapshot, GetterCallToken getterCall, out GetterCallToken boundGetterCall, out string failureReason)
+        {
+            boundGetterCall = getterCall;
+            failureReason = null;
+            if (!TryGetVisibleDirectReturnGetterExpression(snapshot, getterCall.MethodName, out string returnExpression, out failureReason))
+            {
+                return false;
+            }
+
+            if (!TryBuildGetterEvaluationExpression(getterCall.ExpressionText, getterCall.MethodName, returnExpression, out string evaluationExpressionText, out failureReason))
             {
                 return false;
             }
@@ -4963,20 +5051,27 @@ namespace InlineCppVarDbg
             return true;
         }
 
-        private static bool TryGetVisibleDirectReturnGetterExpression(ITextSnapshot snapshot, string methodName, out string returnExpression)
+        private static bool TryGetVisibleDirectReturnGetterExpression(ITextSnapshot snapshot, string methodName, out string returnExpression, out string failureReason)
         {
             returnExpression = null;
+            failureReason = null;
             if (snapshot == null || !IsValidIdentifier(methodName))
             {
+                failureReason = "getter binding context is invalid";
                 return false;
             }
 
             string text = snapshot.GetText();
             if (string.IsNullOrEmpty(text))
             {
+                failureReason = "current file snapshot is empty";
                 return false;
             }
 
+            bool foundMatchingMethodName = false;
+            bool foundZeroArgumentSignature = false;
+            bool foundVisibleBody = false;
+            bool foundNonDirectReturnBody = false;
             int searchIndex = 0;
             while (searchIndex < text.Length)
             {
@@ -4995,6 +5090,8 @@ namespace InlineCppVarDbg
                     continue;
                 }
 
+                foundMatchingMethodName = true;
+
                 int openParenIndex = SkipWhitespace(text, methodEnd);
                 if (openParenIndex >= text.Length || text[openParenIndex] != '(')
                 {
@@ -5012,11 +5109,15 @@ namespace InlineCppVarDbg
                     continue;
                 }
 
+                foundZeroArgumentSignature = true;
+
                 int bodyStart = TryFindVisibleGetterBodyStart(text, closeParenIndex + 1);
                 if (bodyStart < 0 || bodyStart >= text.Length || text[bodyStart] != '{')
                 {
                     continue;
                 }
+
+                foundVisibleBody = true;
 
                 if (!TryFindMatchingPair(text, bodyStart, '{', '}', out int closeBraceIndex))
                 {
@@ -5029,7 +5130,30 @@ namespace InlineCppVarDbg
                     return true;
                 }
 
+                foundNonDirectReturnBody = true;
+
                 searchIndex = closeBraceIndex + 1;
+            }
+
+            if (!foundMatchingMethodName)
+            {
+                failureReason = "no visible getter definition named '" + methodName + "' was found in the current file";
+            }
+            else if (!foundZeroArgumentSignature)
+            {
+                failureReason = "visible definition for '" + methodName + "' is not zero-argument";
+            }
+            else if (!foundVisibleBody)
+            {
+                failureReason = "visible definition for '" + methodName + "' does not have a readable body in the current file";
+            }
+            else if (foundNonDirectReturnBody)
+            {
+                failureReason = "getter body is not a simple direct 'return member;' expression";
+            }
+            else
+            {
+                failureReason = "getter binding failed while parsing the visible definition";
             }
 
             return false;
@@ -5046,23 +5170,27 @@ namespace InlineCppVarDbg
             return string.Equals(compact, "void", StringComparison.Ordinal);
         }
 
-        private static bool TryBuildGetterEvaluationExpression(string getterExpression, string methodName, string returnExpression, out string evaluationExpression)
+        private static bool TryBuildGetterEvaluationExpression(string getterExpression, string methodName, string returnExpression, out string evaluationExpression, out string failureReason)
         {
             evaluationExpression = null;
+            failureReason = null;
             if (string.IsNullOrWhiteSpace(getterExpression) || string.IsNullOrWhiteSpace(returnExpression) || string.IsNullOrWhiteSpace(methodName))
             {
+                failureReason = "getter expression could not be rewritten for evaluation";
                 return false;
             }
 
             string compactReturnExpression = RemoveWhitespace(returnExpression.Trim());
             if (string.IsNullOrEmpty(compactReturnExpression))
             {
+                failureReason = "bound getter return expression is empty";
                 return false;
             }
 
             int callSuffixIndex = getterExpression.LastIndexOf(methodName + "()", StringComparison.Ordinal);
             if (callSuffixIndex < 0)
             {
+                failureReason = "getter call text does not match the expected zero-argument form";
                 return false;
             }
 
@@ -5071,14 +5199,26 @@ namespace InlineCppVarDbg
             {
                 string receiver = getterExpression.Substring(0, methodStart - 2);
                 evaluationExpression = BuildGetterReturnExpression(receiver, "->", compactReturnExpression);
-                return !string.IsNullOrEmpty(evaluationExpression);
+                if (!string.IsNullOrEmpty(evaluationExpression))
+                {
+                    return true;
+                }
+
+                failureReason = "pointer receiver could not be combined with the getter return expression";
+                return false;
             }
 
             if (methodStart >= 1 && getterExpression[methodStart - 1] == '.')
             {
                 string receiver = getterExpression.Substring(0, methodStart - 1);
                 evaluationExpression = BuildGetterReturnExpression(receiver, ".", compactReturnExpression);
-                return !string.IsNullOrEmpty(evaluationExpression);
+                if (!string.IsNullOrEmpty(evaluationExpression))
+                {
+                    return true;
+                }
+
+                failureReason = "object receiver could not be combined with the getter return expression";
+                return false;
             }
 
             evaluationExpression = compactReturnExpression;
@@ -5115,6 +5255,17 @@ namespace InlineCppVarDbg
             }
 
             return receiver + receiverOperator + returnExpression;
+        }
+
+        private static string NormalizeTypeForDiagnostic(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return "<unknown>";
+            }
+
+            string compact = type.Replace("\r", " ").Replace("\n", " ").Trim();
+            return compact.Length > 96 ? compact.Substring(0, 93) + "..." : compact;
         }
 
         private static bool TryFindMatchingBracket(string lineText, int openBracketIndex, out int closeBracketIndex)
@@ -5687,6 +5838,18 @@ namespace InlineCppVarDbg
         private static void WritePerfMessage(string message)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            WriteOutputWindowMessage(PerfOutputPaneGuid, "Inline C++ Value Perf", message);
+        }
+
+        private static void WriteDiagnosticMessage(string message)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            WriteOutputWindowMessage(DiagnosticOutputPaneGuid, "Inline C++ Value", message);
+        }
+
+        private static void WriteOutputWindowMessage(Guid paneGuid, string paneName, string message)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
             try
             {
                 IVsOutputWindow output = Package.GetGlobalService(typeof(SVsOutputWindow)) as IVsOutputWindow;
@@ -5695,8 +5858,7 @@ namespace InlineCppVarDbg
                     return;
                 }
 
-                Guid paneGuid = PerfOutputPaneGuid;
-                output.CreatePane(ref paneGuid, "Inline C++ Value Perf", 1, 1);
+                output.CreatePane(ref paneGuid, paneName, 1, 1);
                 output.GetPane(ref paneGuid, out IVsOutputWindowPane pane);
                 pane?.OutputStringThreadSafe(message + Environment.NewLine);
             }
@@ -5806,8 +5968,8 @@ namespace InlineCppVarDbg
                     continue;
                 }
 
-                if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall) ||
-                    !TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall))
+                if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out _) ||
+                    !TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall, out _))
                 {
                     return false;
                 }
@@ -5843,6 +6005,7 @@ namespace InlineCppVarDbg
             }
 
             manualGetterRequests.Add(expressionText);
+            debuggerBridge.RequestGetterDiagnosticsForNextEvaluation();
             Invalidate();
             e.Handled = true;
         }
@@ -6011,6 +6174,103 @@ namespace InlineCppVarDbg
             byte g = (byte)(from.G + ((to.G - from.G) * t));
             byte b = (byte)(from.B + ((to.B - from.B) * t));
             return Color.FromArgb(a, r, g, b);
+        }
+
+        private sealed class GetterDiagnosticSession
+        {
+            private readonly string filePath;
+            private readonly int lineNumber;
+            private readonly string requestLabel;
+            private readonly HashSet<string> candidateExpressions;
+            private readonly HashSet<string> shownExpressions;
+            private readonly Dictionary<string, string> skippedReasons;
+
+            public GetterDiagnosticSession(string filePath, int lineNumber, string requestLabel)
+            {
+                this.filePath = filePath;
+                this.lineNumber = lineNumber;
+                this.requestLabel = string.IsNullOrWhiteSpace(requestLabel) ? "manual request" : requestLabel;
+                candidateExpressions = new HashSet<string>(StringComparer.Ordinal);
+                shownExpressions = new HashSet<string>(StringComparer.Ordinal);
+                skippedReasons = new Dictionary<string, string>(StringComparer.Ordinal);
+            }
+
+            public void RecordCandidate(string expressionText)
+            {
+                if (!string.IsNullOrWhiteSpace(expressionText))
+                {
+                    candidateExpressions.Add(expressionText);
+                }
+            }
+
+            public void RecordShown(string expressionText)
+            {
+                if (!string.IsNullOrWhiteSpace(expressionText))
+                {
+                    shownExpressions.Add(expressionText);
+                    skippedReasons.Remove(expressionText);
+                }
+            }
+
+            public void RecordSkip(string expressionText, string reason)
+            {
+                if (string.IsNullOrWhiteSpace(expressionText) || string.IsNullOrWhiteSpace(reason))
+                {
+                    return;
+                }
+
+                if (shownExpressions.Contains(expressionText) || skippedReasons.ContainsKey(expressionText))
+                {
+                    return;
+                }
+
+                skippedReasons[expressionText] = reason;
+            }
+
+            public void WriteSummary()
+            {
+                var builder = new StringBuilder(256 + (skippedReasons.Count * 96));
+                builder.Append("InlineCppVarDbg GET diagnostics request=");
+                builder.Append(requestLabel);
+                builder.Append(", file=");
+                builder.Append(System.IO.Path.GetFileName(filePath));
+                builder.Append(':');
+                builder.Append(lineNumber);
+                builder.Append(", candidates=");
+                builder.Append(candidateExpressions.Count);
+                builder.Append(", shown=");
+                builder.Append(shownExpressions.Count);
+                builder.Append(", skipped=");
+                builder.Append(skippedReasons.Count);
+
+                if (candidateExpressions.Count == 0)
+                {
+                    builder.AppendLine();
+                    builder.Append("  <no getter call candidates found in the scanned range>");
+                }
+                else if (skippedReasons.Count == 0)
+                {
+                    builder.AppendLine();
+                    builder.Append("  <all scanned getter call candidates were displayed>");
+                }
+                else
+                {
+                    foreach (KeyValuePair<string, string> pair in skippedReasons.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                    {
+                        builder.AppendLine();
+                        builder.Append("  ");
+                        builder.Append(pair.Key);
+                        builder.Append(" -> ");
+                        builder.Append(pair.Value);
+                    }
+                }
+
+                string message = builder.ToString();
+                System.Diagnostics.Debug.WriteLine(message);
+                System.Diagnostics.Trace.WriteLine(message);
+                ThreadHelper.ThrowIfNotOnUIThread();
+                WriteDiagnosticMessage(message);
+            }
         }
 
         private sealed class PerfSession : IDisposable

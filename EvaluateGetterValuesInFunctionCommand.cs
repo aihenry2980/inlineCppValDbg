@@ -38,6 +38,7 @@ namespace InlineCppVarDbg
             if (settings.IsEnabled)
             {
                 bridge.RequestProfileForNextEvaluation(DebuggerBridge.ProfileRequestKind.GetButton);
+                bridge.RequestGetterDiagnosticsForNextEvaluation();
             }
 
             bridge.RequestManualGetterFunctionSweep();
