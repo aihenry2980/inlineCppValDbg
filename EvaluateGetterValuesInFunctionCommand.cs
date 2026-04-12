@@ -2,6 +2,7 @@ using Microsoft.VisualStudio.Shell;
 using System;
 using System.ComponentModel.Design;
 using System.Threading.Tasks;
+using System.Windows.Input;
 
 namespace InlineCppVarDbg
 {
@@ -35,6 +36,13 @@ namespace InlineCppVarDbg
 
             InlineValuesSettings settings = InlineValuesServiceLocator.GetSettings(package);
             DebuggerBridge bridge = InlineValuesServiceLocator.GetBridge(package);
+            bool addToWatch = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+            if (addToWatch)
+            {
+                bridge.RequestWatchGetterFunctionSweep();
+                return;
+            }
+
             if (settings.IsEnabled)
             {
                 bridge.RequestProfileForNextEvaluation(DebuggerBridge.ProfileRequestKind.GetButton);

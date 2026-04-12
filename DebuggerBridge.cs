@@ -3,6 +3,8 @@ using EnvDTE80;
 using EnvDTE90a;
 using Microsoft.VisualStudio.Shell;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace InlineCppVarDbg
@@ -17,6 +19,7 @@ namespace InlineCppVarDbg
         private int manualVariableFunctionSweepRequested;
         private int profileNextEvaluationRequestKind;
         private int getterDiagnosticsNextEvaluationRequested;
+        private int watchGetterFunctionSweepRequested;
 
         public event EventHandler DebugStateChanged;
 
@@ -48,6 +51,8 @@ namespace InlineCppVarDbg
         public bool IsManualGetterFunctionSweepRequested => Volatile.Read(ref manualGetterFunctionSweepRequested) != 0;
 
         public bool IsManualVariableFunctionSweepRequested => Volatile.Read(ref manualVariableFunctionSweepRequested) != 0;
+
+        public bool IsWatchGetterFunctionSweepRequested => Volatile.Read(ref watchGetterFunctionSweepRequested) != 0;
 
         public bool IsInDesignMode()
         {
@@ -131,6 +136,12 @@ namespace InlineCppVarDbg
             Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 1);
         }
 
+        public void RequestWatchGetterFunctionSweep()
+        {
+            Interlocked.Exchange(ref watchGetterFunctionSweepRequested, 1);
+            IncrementVersionAndNotify();
+        }
+
         public void RequestManualVariableFunctionSweep()
         {
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 1);
@@ -151,12 +162,66 @@ namespace InlineCppVarDbg
             return Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 0) != 0;
         }
 
+        public bool TryConsumeWatchGetterFunctionSweep()
+        {
+            return Interlocked.Exchange(ref watchGetterFunctionSweepRequested, 0) != 0;
+        }
+
+        public WatchAddResult AddSelectedExpressionsToWatch(IEnumerable<string> expressionLabels, Action<string> selectExpression)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var failures = new List<string>();
+            if (dte2 == null)
+            {
+                return new WatchAddResult(0, 0, new[] { "Visual Studio automation object is unavailable." });
+            }
+
+            string[] distinctExpressions = expressionLabels?
+                .Where(expression => !string.IsNullOrWhiteSpace(expression))
+                .Select(expression => expression.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToArray() ?? Array.Empty<string>();
+
+            if (distinctExpressions.Length == 0)
+            {
+                return new WatchAddResult(0, 0, Array.Empty<string>());
+            }
+
+            try
+            {
+                dte2.ExecuteCommand("Debug.Watch1");
+            }
+            catch
+            {
+                // The AddWatch command can still succeed even if the Watch 1 window was already unavailable to open.
+            }
+
+            int added = 0;
+            foreach (string expression in distinctExpressions)
+            {
+                try
+                {
+                    selectExpression?.Invoke(expression);
+                    dte2.ExecuteCommand("Debug.AddWatch");
+                    added++;
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(expression + " -> " + ex.Message);
+                }
+            }
+
+            return new WatchAddResult(distinctExpressions.Length, added, failures);
+        }
+
         private void OnEnterBreakMode(dbgEventReason Reason, ref dbgExecutionAction ExecutionAction)
         {
             Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0);
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 0);
+            Interlocked.Exchange(ref watchGetterFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
@@ -166,6 +231,7 @@ namespace InlineCppVarDbg
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 0);
+            Interlocked.Exchange(ref watchGetterFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
@@ -175,6 +241,7 @@ namespace InlineCppVarDbg
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 0);
+            Interlocked.Exchange(ref watchGetterFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
@@ -184,6 +251,7 @@ namespace InlineCppVarDbg
             Interlocked.Exchange(ref manualVariableFunctionSweepRequested, 0);
             Interlocked.Exchange(ref profileNextEvaluationRequestKind, (int)ProfileRequestKind.None);
             Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 0);
+            Interlocked.Exchange(ref watchGetterFunctionSweepRequested, 0);
             IncrementVersionAndNotify();
         }
 
@@ -214,6 +282,20 @@ namespace InlineCppVarDbg
             None = 0,
             GetButton = 1,
             ToggleOnButton = 2,
+        }
+
+        internal readonly struct WatchAddResult
+        {
+            public WatchAddResult(int requestedCount, int addedCount, IReadOnlyList<string> failures)
+            {
+                RequestedCount = requestedCount;
+                AddedCount = addedCount;
+                Failures = failures ?? Array.Empty<string>();
+            }
+
+            public int RequestedCount { get; }
+            public int AddedCount { get; }
+            public IReadOnlyList<string> Failures { get; }
         }
     }
 }

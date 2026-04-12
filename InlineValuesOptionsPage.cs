@@ -15,6 +15,13 @@ namespace InlineCppVarDbg
         private const string DefaultUninitializedValueBackgroundColor = "#FFF59D";
         private const string DefaultValueChangedAccentColor = "#FF8FB1";
         private const int DefaultValueChipFontSize = 10;
+        private const string ToolbarButtonsExplanationText =
+            "ON/off: Toggles the whole inline value extension on or off. When it shows ON/off, inline values are enabled. When it shows on/OFF, they are paused.\r\n\r\n" +
+            "IN/end: Toggles where the value chips appear. IN/end means values are shown inline beside the variable/expression. in/END means values are moved to the end of the source line.\r\n\r\n" +
+            "h/D/b: Cycles numeric display format. The capital letter is the current mode: h/D/b is decimal, H/d/b is hex, and h/d/B is binary.\r\n\r\n" +
+            "GET: Manually evaluates visible Get*() / Is*() calls in the current function during the current break state. Use this for getters that are not evaluated automatically. Ctrl+click GET tries to add getter expressions to the Visual Studio Watch window instead.\r\n\r\n" +
+            "ALL: Manually evaluates all eligible variables in the current function for the current break state, beyond the normal nearby/current-line budget. Useful when you want more context, but it may be slower.\r\n\r\n" +
+            "CFG: Opens this extension options page, where you can enable/disable evaluation categories and type rules like pointers, arrays, structs, char arrays, numeric formats, colors, and placement.";
         private const InlineValueTypeRuleKinds DefaultTypeRuleKinds =
             InlineValueTypeRuleKinds.BooleanScalars |
             InlineValueTypeRuleKinds.CharacterScalars |
@@ -70,6 +77,17 @@ namespace InlineCppVarDbg
         {
             get => displayMode;
             set => displayMode = value;
+        }
+
+        [Category("General")]
+        [DisplayName("Toolbar buttons explanation")]
+        [Description("Quick reference for what each Inline Cpp Var Dbg toolbar button does.")]
+        [Editor(typeof(MultilineStringEditor), typeof(System.Drawing.Design.UITypeEditor))]
+        [ReadOnly(true)]
+        public string ToolbarButtonsExplanation
+        {
+            get => ToolbarButtonsExplanationText;
+            set { }
         }
 
         [Category("Appearance")]

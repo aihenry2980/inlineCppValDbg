@@ -27,6 +27,7 @@ namespace InlineCppVarDbg
         private const string DefaultChangedAccentHex = "#FF8FB1";
         private const int MaxManualFadeSteps = 5;
         private const int DefaultPerExpressionTimeoutMs = 10;
+        private const int ManualGetterEvaluationTimeoutMs = 10000;
         private const long PerfLogThresholdMs = 250;
         private const long RequestedProfileLogThresholdMs = 3000;
         private const long SlowEvaluationThresholdMs = 25;
@@ -248,9 +249,10 @@ namespace InlineCppVarDbg
             }
 
             bool manualVariableFunctionSweep = debuggerBridge.IsManualVariableFunctionSweepRequested;
-            EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount, manualVariableFunctionSweep);
             int functionStartLineNumber = FindEnclosingFunctionStartLine(snapshot, lineNumber);
             bool manualGetterFunctionSweep = debuggerBridge.IsManualGetterFunctionSweepRequested;
+            bool watchGetterFunctionSweep = debuggerBridge.TryConsumeWatchGetterFunctionSweep();
+            EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount, manualVariableFunctionSweep, manualGetterFunctionSweep);
             int functionEndLineNumber = functionStartLineNumber >= 0
                 ? FindEnclosingFunctionEndLine(snapshot, functionStartLineNumber)
                 : lineNumber;
@@ -262,8 +264,9 @@ namespace InlineCppVarDbg
             int regularEndLineNumber = manualVariableFunctionSweep
                 ? Math.Max(lineNumber, functionEndLineNumber)
                 : lineNumber;
-            int getterStartLineNumber = manualGetterFunctionSweep ? functionScopeStartLine : regularStartLineNumber;
-            int getterEndLineNumber = manualGetterFunctionSweep ? Math.Max(lineNumber, functionEndLineNumber) : regularEndLineNumber;
+            bool scanGetterFunctionScope = manualGetterFunctionSweep || watchGetterFunctionSweep;
+            int getterStartLineNumber = scanGetterFunctionScope ? functionScopeStartLine : regularStartLineNumber;
+            int getterEndLineNumber = scanGetterFunctionScope ? Math.Max(lineNumber, functionEndLineNumber) : regularEndLineNumber;
             int coveredStartLineNumber = Math.Min(regularStartLineNumber, getterStartLineNumber);
             int coveredEndLineNumber = Math.Max(regularEndLineNumber, getterEndLineNumber);
             HashSet<string> parameterNames = GetStackFrameParameterNames(context.StackFrame);
@@ -284,6 +287,8 @@ namespace InlineCppVarDbg
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
             var allGetterCalls = new List<GetterCallToken>();
             var allMemberAccesses = new List<GetterCallToken>();
+            var allWatchGetterExpressions = new List<string>();
+            var watchGetterSpans = new Dictionary<string, SnapshotSpan>(StringComparer.Ordinal);
             for (int lineIndex = coveredStartLineNumber; lineIndex <= coveredEndLineNumber; lineIndex++)
             {
                 ITextSnapshotLine line = snapshot.GetLineFromLineNumber(lineIndex);
@@ -307,6 +312,19 @@ namespace InlineCppVarDbg
                     if (scanGetterTokens && IsPotentialGetterCallToken(lineText, token))
                     {
                         string getterLabel = BuildGetterDiagnosticLabel(lineText, token);
+                        if (watchGetterFunctionSweep)
+                        {
+                            allWatchGetterExpressions.Add(getterLabel);
+                            if (!watchGetterSpans.ContainsKey(getterLabel) &&
+                                TryFindGetterCallSpan(lineText, token, out _, out int getterStart, out int getterEnd))
+                            {
+                                watchGetterSpans[getterLabel] = new SnapshotSpan(
+                                    snapshot,
+                                    line.Start.Position + getterStart,
+                                    getterEnd - getterStart);
+                            }
+                        }
+
                         getterDiagnosticSession?.RecordCandidate(getterLabel);
 
                         if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out string getterParseFailureReason))
@@ -315,7 +333,16 @@ namespace InlineCppVarDbg
                         }
                         else if (!TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall, out string getterBindFailureReason))
                         {
-                            getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, getterBindFailureReason);
+                            bool allowManualRawGetter = manualGetterFunctionSweep || manualGetterRequests.Contains(getterCall.ExpressionText);
+                            if (allowManualRawGetter)
+                            {
+                                getterCalls.Add(getterCall);
+                                getterDiagnosticSession?.RecordInfo(getterCall.ExpressionText, getterBindFailureReason + "; evaluating full getter call directly");
+                            }
+                            else
+                            {
+                                getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, getterBindFailureReason);
+                            }
                         }
                         else
                         {
@@ -375,7 +402,14 @@ namespace InlineCppVarDbg
                 allMemberAccesses.AddRange(memberAccesses);
             }
 
-            if (allTokens.Count == 0 && allGetterCalls.Count == 0 && allMemberAccesses.Count == 0 && parameterNames.Count == 0)
+            if (watchGetterFunctionSweep)
+            {
+                WriteWatchGetterSummary(
+                    AddSelectedGetterExpressionsToWatch(debuggerBridge, allWatchGetterExpressions, watchGetterSpans),
+                    allWatchGetterExpressions);
+            }
+
+            if (allTokens.Count == 0 && allGetterCalls.Count == 0 && allMemberAccesses.Count == 0 && allWatchGetterExpressions.Count == 0 && parameterNames.Count == 0)
             {
                 ITextSnapshotLine startLine = snapshot.GetLineFromLineNumber(coveredStartLineNumber);
                 ITextSnapshotLine endLine = snapshot.GetLineFromLineNumber(coveredEndLineNumber);
@@ -817,10 +851,15 @@ namespace InlineCppVarDbg
 
                 try
                 {
-                    EnvDTE.Expression expression = TimedGetExpression(debugger, getterCall.EvaluationExpressionText, 50, "Getter.GetExpression");
+                    bool usesDirectGetterCall = string.Equals(getterCall.EvaluationExpressionText, getterCall.ExpressionText, StringComparison.Ordinal);
+                    int timeout = isManualGetterRequest ? ManualGetterEvaluationTimeoutMs : 50;
+                    string phase = usesDirectGetterCall ? "Getter.DirectCall.GetExpression" : "Getter.GetExpression";
+                    EnvDTE.Expression expression = TimedGetExpression(debugger, getterCall.EvaluationExpressionText, timeout, phase);
                     if (expression == null || !expression.IsValidValue)
                     {
-                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "debugger could not evaluate the bound getter expression");
+                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, usesDirectGetterCall
+                            ? "debugger could not evaluate the full getter call"
+                            : "debugger could not evaluate the bound getter expression");
                         continue;
                     }
 
@@ -1244,6 +1283,49 @@ namespace InlineCppVarDbg
             }
 
             return TryFormatNumericLiteral(numericDisplayMode, normalizedValue, out displayValue);
+        }
+
+        private static bool TryFormatBooleanValue(string type, string rawValue, string normalizedValue, out string displayValue)
+        {
+            displayValue = normalizedValue;
+            if (!IsBooleanScalarType(type))
+            {
+                return false;
+            }
+
+            string text = NormalizeValue(rawValue) ?? NormalizeValue(normalizedValue);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            string lower = text.Trim().ToLowerInvariant();
+            bool? value = null;
+            if (lower.StartsWith("true", StringComparison.Ordinal))
+            {
+                value = true;
+            }
+            else if (lower.StartsWith("false", StringComparison.Ordinal))
+            {
+                value = false;
+            }
+            else
+            {
+                string leadingToken = ExtractLeadingToken(text);
+                if (TryParseSignedInteger(leadingToken, out long numericValue) ||
+                    TryParseSignedInteger(text, out numericValue))
+                {
+                    value = numericValue != 0;
+                }
+            }
+
+            if (!value.HasValue)
+            {
+                return false;
+            }
+
+            displayValue = value.Value ? "true(1)" : "false(0)";
+            return true;
         }
 
         private static bool TryFormatEnumValue(
@@ -1840,6 +1922,18 @@ namespace InlineCppVarDbg
                 }
 
                 displayValue = uninitializedDisplay;
+            }
+            else if (TryFormatBooleanValue(type, rawValue, normalizedValue, out string boolDisplay))
+            {
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
+                {
+                    return false;
+                }
+
+                displayValue = boolDisplay;
             }
             else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
             {
@@ -5002,9 +5096,24 @@ namespace InlineCppVarDbg
 
         private static string BuildGetterDiagnosticLabel(string lineText, CppCurrentLineTokenizer.IdentifierToken token)
         {
+            return TryFindGetterCallSpan(lineText, token, out string label, out _, out _)
+                ? label
+                : token.Name;
+        }
+
+        private static bool TryFindGetterCallSpan(
+            string lineText,
+            CppCurrentLineTokenizer.IdentifierToken token,
+            out string label,
+            out int expressionStart,
+            out int expressionEnd)
+        {
+            label = null;
+            expressionStart = -1;
+            expressionEnd = -1;
             if (string.IsNullOrEmpty(lineText))
             {
-                return token.Name;
+                return false;
             }
 
             int openParenIndex = token.Start + token.Length;
@@ -5015,22 +5124,23 @@ namespace InlineCppVarDbg
 
             if (openParenIndex >= lineText.Length || lineText[openParenIndex] != '(')
             {
-                return token.Name;
+                return false;
             }
 
             if (!TryFindMatchingParen(lineText, openParenIndex, out int closeParenIndex))
             {
-                return token.Name;
+                return false;
             }
 
-            int expressionStart = FindGetterExpressionStart(lineText, token.Start);
+            expressionStart = FindGetterExpressionStart(lineText, token.Start);
             if (expressionStart < 0 || expressionStart > token.Start)
             {
                 expressionStart = token.Start;
             }
 
-            string label = RemoveWhitespace(lineText.Substring(expressionStart, closeParenIndex - expressionStart + 1).Trim());
-            return string.IsNullOrEmpty(label) ? token.Name : label;
+            expressionEnd = closeParenIndex + 1;
+            label = RemoveWhitespace(lineText.Substring(expressionStart, expressionEnd - expressionStart).Trim());
+            return !string.IsNullOrEmpty(label);
         }
 
         private static bool TryBindVisibleDirectReturnGetter(ITextSnapshot snapshot, GetterCallToken getterCall, out GetterCallToken boundGetterCall, out string failureReason)
@@ -5728,14 +5838,31 @@ namespace InlineCppVarDbg
                 allowCharProbing: false);
         }
 
-        private EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount, bool manualVariableFunctionSweep)
+        private EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount, bool manualVariableFunctionSweep, bool manualGetterFunctionSweep)
         {
+            if (manualGetterFunctionSweep)
+            {
+                return CreateManualGetterSweepPolicy(configuredPreviousLineCount);
+            }
+
             if (manualVariableFunctionSweep)
             {
                 return CreateManualFunctionSweepPolicy(configuredPreviousLineCount);
             }
 
             return CreateStandardEvaluationPolicy(configuredPreviousLineCount);
+        }
+
+        private static EvaluationPolicy CreateManualGetterSweepPolicy(int configuredPreviousLineCount)
+        {
+            int clampedPreviousLines = Math.Max(0, configuredPreviousLineCount);
+            return new EvaluationPolicy(
+                previousLineCount: clampedPreviousLines,
+                perExpressionTimeoutMs: ManualGetterEvaluationTimeoutMs,
+                allowFallbackExpressions: true,
+                allowDataMemberRecursion: false,
+                allowArrayProbing: false,
+                allowCharProbing: false);
         }
 
         private static bool ShouldAbortEvaluation()
@@ -5845,6 +5972,112 @@ namespace InlineCppVarDbg
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             WriteOutputWindowMessage(DiagnosticOutputPaneGuid, "Inline C++ Value", message);
+        }
+
+        private static void WriteWatchGetterSummary(DebuggerBridge.WatchAddResult result, IEnumerable<string> requestedExpressions)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            int discoveredCount = requestedExpressions?
+                .Where(expression => !string.IsNullOrWhiteSpace(expression))
+                .Select(expression => expression.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .Count() ?? 0;
+
+            var builder = new StringBuilder(256);
+            builder.Append("InlineCppVarDbg WATCH getters discovered=");
+            builder.Append(discoveredCount);
+            builder.Append(", requested=");
+            builder.Append(result.RequestedCount);
+            builder.Append(", added=");
+            builder.Append(result.AddedCount);
+
+            if (result.RequestedCount == 0)
+            {
+                builder.AppendLine();
+                builder.Append("  <no Get*/Is* calls found in the current function scope>");
+            }
+            else if (result.Failures.Count == 0)
+            {
+                builder.AppendLine();
+                builder.Append("  <added getter calls to Visual Studio Watch 1>");
+            }
+            else
+            {
+                foreach (string failure in result.Failures)
+                {
+                    builder.AppendLine();
+                    builder.Append("  ");
+                    builder.Append(failure);
+                }
+            }
+
+            WriteDiagnosticMessage(builder.ToString());
+        }
+
+        private DebuggerBridge.WatchAddResult AddSelectedGetterExpressionsToWatch(
+            DebuggerBridge bridge,
+            IEnumerable<string> requestedExpressions,
+            IReadOnlyDictionary<string, SnapshotSpan> expressionSpans)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            SnapshotPoint originalCaret = textView.Caret.Position.BufferPosition;
+            List<SnapshotSpan> originalSelectedSpans = textView.Selection.SelectedSpans.ToList();
+            bool originalIsReversed = textView.Selection.IsReversed;
+
+            try
+            {
+                return bridge.AddSelectedExpressionsToWatch(
+                    requestedExpressions,
+                    expression =>
+                    {
+                        if (expressionSpans == null || !expressionSpans.TryGetValue(expression, out SnapshotSpan span))
+                        {
+                            throw new InvalidOperationException("Could not select the expression in the editor.");
+                        }
+
+                        textView.Selection.Select(span, false);
+                        textView.Caret.MoveTo(span.End);
+                    });
+            }
+            finally
+            {
+                RestoreSelection(originalSelectedSpans, originalIsReversed, originalCaret);
+            }
+        }
+
+        private void RestoreSelection(IReadOnlyList<SnapshotSpan> selectedSpans, bool isReversed, SnapshotPoint caret)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            try
+            {
+                if (selectedSpans != null && selectedSpans.Count > 0)
+                {
+                    SnapshotSpan span = selectedSpans[0];
+                    if (span.Snapshot == textBuffer.CurrentSnapshot)
+                    {
+                        textView.Selection.Select(span, isReversed);
+                    }
+                    else
+                    {
+                        textView.Selection.Clear();
+                    }
+                }
+                else
+                {
+                    textView.Selection.Clear();
+                }
+
+                if (caret.Snapshot == textBuffer.CurrentSnapshot)
+                {
+                    textView.Caret.MoveTo(caret);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static void WriteOutputWindowMessage(Guid paneGuid, string paneName, string message)
@@ -6183,6 +6416,7 @@ namespace InlineCppVarDbg
             private readonly string requestLabel;
             private readonly HashSet<string> candidateExpressions;
             private readonly HashSet<string> shownExpressions;
+            private readonly Dictionary<string, string> infoMessages;
             private readonly Dictionary<string, string> skippedReasons;
 
             public GetterDiagnosticSession(string filePath, int lineNumber, string requestLabel)
@@ -6192,6 +6426,7 @@ namespace InlineCppVarDbg
                 this.requestLabel = string.IsNullOrWhiteSpace(requestLabel) ? "manual request" : requestLabel;
                 candidateExpressions = new HashSet<string>(StringComparer.Ordinal);
                 shownExpressions = new HashSet<string>(StringComparer.Ordinal);
+                infoMessages = new Dictionary<string, string>(StringComparer.Ordinal);
                 skippedReasons = new Dictionary<string, string>(StringComparer.Ordinal);
             }
 
@@ -6209,6 +6444,19 @@ namespace InlineCppVarDbg
                 {
                     shownExpressions.Add(expressionText);
                     skippedReasons.Remove(expressionText);
+                }
+            }
+
+            public void RecordInfo(string expressionText, string message)
+            {
+                if (string.IsNullOrWhiteSpace(expressionText) || string.IsNullOrWhiteSpace(message))
+                {
+                    return;
+                }
+
+                if (!infoMessages.ContainsKey(expressionText))
+                {
+                    infoMessages[expressionText] = message;
                 }
             }
 
@@ -6255,14 +6503,13 @@ namespace InlineCppVarDbg
                 }
                 else
                 {
-                    foreach (KeyValuePair<string, string> pair in skippedReasons.OrderBy(pair => pair.Key, StringComparer.Ordinal))
-                    {
-                        builder.AppendLine();
-                        builder.Append("  ");
-                        builder.Append(pair.Key);
-                        builder.Append(" -> ");
-                        builder.Append(pair.Value);
-                    }
+                    AppendInfoMessages(builder);
+                    AppendSkippedReasons(builder);
+                }
+                
+                if (skippedReasons.Count == 0)
+                {
+                    AppendInfoMessages(builder);
                 }
 
                 string message = builder.ToString();
@@ -6270,6 +6517,30 @@ namespace InlineCppVarDbg
                 System.Diagnostics.Trace.WriteLine(message);
                 ThreadHelper.ThrowIfNotOnUIThread();
                 WriteDiagnosticMessage(message);
+            }
+
+            private void AppendInfoMessages(StringBuilder builder)
+            {
+                foreach (KeyValuePair<string, string> pair in infoMessages.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                {
+                    builder.AppendLine();
+                    builder.Append("  ");
+                    builder.Append(pair.Key);
+                    builder.Append(" -> ");
+                    builder.Append(pair.Value);
+                }
+            }
+
+            private void AppendSkippedReasons(StringBuilder builder)
+            {
+                foreach (KeyValuePair<string, string> pair in skippedReasons.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                {
+                    builder.AppendLine();
+                    builder.Append("  ");
+                    builder.Append(pair.Key);
+                    builder.Append(" -> ");
+                    builder.Append(pair.Value);
+                }
             }
         }
 
