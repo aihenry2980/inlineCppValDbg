@@ -56,8 +56,8 @@
         <CommandFlag>TextChanges</CommandFlag>
         <Strings>
           <ButtonText>GET</ButtonText>
-          <MenuText>Evaluate Get/Is In Function</MenuText>
-          <ToolTipText>Manually evaluate visible Get/Is return values in the current function for this break state.</ToolTipText>
+          <MenuText>Evaluate Get/Is At Caret Or Selection</MenuText>
+          <ToolTipText>Evaluate Get/Is under the caret, or every Get/Is call in the selected text. Shortcut: Alt+Q in Text Editor.</ToolTipText>
         </Strings>
       </Button>
 
@@ -91,6 +91,10 @@
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateAllValuesInFunction" priority="0x0140"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
     <CommandPlacement guid="guidInlineCppVarDbgCmdSet" id="cmdidOpenQuickConfig" priority="0x0150"><Parent guid="guidInlineCppVarDbgCmdSet" id="InlineCppVarDbgGroup" /></CommandPlacement>
   </CommandPlacements>
+
+  <KeyBindings>
+    <KeyBinding guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateGetterValuesInFunction" editor="GUID_TextEditorFactory" key1="Q" mod1="ALT" />
+  </KeyBindings>
 
   <Symbols>
     <GuidSymbol name="guidInlineCppVarDbgPackage" value="{63e068a1-5c78-4229-9118-88306593cf1a}" />

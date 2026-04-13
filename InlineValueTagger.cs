@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -27,12 +28,14 @@ namespace InlineCppVarDbg
         private const string DefaultChangedAccentHex = "#FF8FB1";
         private const int MaxManualFadeSteps = 5;
         private const int DefaultPerExpressionTimeoutMs = 10;
-        private const int ManualGetterEvaluationTimeoutMs = 10000;
+        private const int ManualGetterEvaluationTimeoutMs = 2000;
         private const long PerfLogThresholdMs = 250;
         private const long RequestedProfileLogThresholdMs = 3000;
         private const long SlowEvaluationThresholdMs = 25;
         private const string NullValueMarker = "\u0001N:";
         private const string UninitializedValueMarker = "\u0001U:";
+        private const string StatusValueMarker = "\u0001S:";
+        private const string LoadingValueText = "loading...";
         private static readonly Guid PerfOutputPaneGuid = new Guid("2A09B390-E700-42DE-9A4D-DC37F74B71F2");
         private static readonly Guid DiagnosticOutputPaneGuid = new Guid("9A73E8B0-1A1A-4F8E-B1C4-3EE4927C4751");
 
@@ -94,6 +97,10 @@ namespace InlineCppVarDbg
         private Dictionary<string, string> lastResolvedValues = new Dictionary<string, string>(StringComparer.Ordinal);
         private Dictionary<string, int> lastHighlightLevels = new Dictionary<string, int>(StringComparer.Ordinal);
         private readonly HashSet<string> manualGetterRequests = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<int> manualGetterRequestLineNumbers = new HashSet<int>();
+        private readonly object asyncManualGetterLock = new object();
+        private readonly Dictionary<string, AsyncManualGetterState> asyncManualGetterStates = new Dictionary<string, AsyncManualGetterState>(StringComparer.Ordinal);
+        private int asyncManualGetterGeneration;
         [ThreadStatic]
         private static PerfSession currentPerfSession;
 
@@ -250,9 +257,48 @@ namespace InlineCppVarDbg
 
             bool manualVariableFunctionSweep = debuggerBridge.IsManualVariableFunctionSweepRequested;
             int functionStartLineNumber = FindEnclosingFunctionStartLine(snapshot, lineNumber);
-            bool manualGetterFunctionSweep = debuggerBridge.IsManualGetterFunctionSweepRequested;
+            bool manualGetterButtonRequest = debuggerBridge.TryConsumeManualGetterAtCaretRequest();
+            string manualGetterRequestScope = null;
+            string manualGetterRequestFailureReason = null;
+            if (manualGetterButtonRequest)
+            {
+                ClearManualGetterRequestsAndAsyncState();
+                var selectedGetterRequests = new HashSet<string>(StringComparer.Ordinal);
+                var selectedGetterLineNumbers = new HashSet<int>();
+                bool hadSelection = TryCollectManualGetterRequestsFromSelection(snapshot, context, selectedGetterRequests, selectedGetterLineNumbers);
+                if (hadSelection)
+                {
+                    manualGetterRequestScope = "GET button selection";
+                    foreach (string expressionText in selectedGetterRequests)
+                    {
+                        manualGetterRequests.Add(expressionText);
+                    }
+
+                    foreach (int selectedLineNumber in selectedGetterLineNumbers)
+                    {
+                        manualGetterRequestLineNumbers.Add(selectedLineNumber);
+                    }
+
+                    if (selectedGetterRequests.Count == 0)
+                    {
+                        manualGetterRequestFailureReason = "no Get*/Is*() calls found in the selected text";
+                    }
+                }
+                else if (TryResolveManualGetterRequestAtCaret(snapshot, context, out string manualGetterAtCaretExpression, out int manualGetterAtCaretLineNumber))
+                {
+                    manualGetterRequestScope = "GET button at caret";
+                    manualGetterRequests.Add(manualGetterAtCaretExpression);
+                    manualGetterRequestLineNumbers.Add(manualGetterAtCaretLineNumber);
+                }
+                else
+                {
+                    manualGetterRequestScope = "GET button at caret";
+                    manualGetterRequestFailureReason = "no Get*/Is*() call found under the editor caret";
+                }
+            }
+
             bool watchGetterFunctionSweep = debuggerBridge.TryConsumeWatchGetterFunctionSweep();
-            EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount, manualVariableFunctionSweep, manualGetterFunctionSweep);
+            EvaluationPolicy evaluationPolicy = CreateEvaluationPolicy(settings.PreviousLineCount, manualVariableFunctionSweep);
             int functionEndLineNumber = functionStartLineNumber >= 0
                 ? FindEnclosingFunctionEndLine(snapshot, functionStartLineNumber)
                 : lineNumber;
@@ -264,11 +310,13 @@ namespace InlineCppVarDbg
             int regularEndLineNumber = manualVariableFunctionSweep
                 ? Math.Max(lineNumber, functionEndLineNumber)
                 : lineNumber;
-            bool scanGetterFunctionScope = manualGetterFunctionSweep || watchGetterFunctionSweep;
-            int getterStartLineNumber = scanGetterFunctionScope ? functionScopeStartLine : regularStartLineNumber;
-            int getterEndLineNumber = scanGetterFunctionScope ? Math.Max(lineNumber, functionEndLineNumber) : regularEndLineNumber;
-            int coveredStartLineNumber = Math.Min(regularStartLineNumber, getterStartLineNumber);
-            int coveredEndLineNumber = Math.Max(regularEndLineNumber, getterEndLineNumber);
+            int watchGetterStartLineNumber = watchGetterFunctionSweep ? functionScopeStartLine : regularStartLineNumber;
+            int watchGetterEndLineNumber = watchGetterFunctionSweep ? Math.Max(lineNumber, functionEndLineNumber) : regularEndLineNumber;
+            HashSet<int> manualGetterLineNumbers = new HashSet<int>(manualGetterRequestLineNumbers);
+            int manualGetterStartLineNumber = manualGetterLineNumbers.Count > 0 ? manualGetterLineNumbers.Min() : regularStartLineNumber;
+            int manualGetterEndLineNumber = manualGetterLineNumbers.Count > 0 ? manualGetterLineNumbers.Max() : regularEndLineNumber;
+            int coveredStartLineNumber = Math.Min(Math.Min(regularStartLineNumber, watchGetterStartLineNumber), manualGetterStartLineNumber);
+            int coveredEndLineNumber = Math.Max(Math.Max(regularEndLineNumber, watchGetterEndLineNumber), manualGetterEndLineNumber);
             HashSet<string> parameterNames = GetStackFrameParameterNames(context.StackFrame);
             InlineValueNumericDisplayMode numericDisplayMode = settings.NumericDisplayMode;
             InlineValueEvaluationKinds evaluationKinds = settings.EvaluationKinds;
@@ -280,8 +328,12 @@ namespace InlineCppVarDbg
                 : DebuggerBridge.ProfileRequestKind.None;
             bool logGetterDiagnostics = debuggerBridge.TryConsumeGetterDiagnosticsForNextEvaluation();
             GetterDiagnosticSession getterDiagnosticSession = logGetterDiagnostics
-                ? new GetterDiagnosticSession(documentPath, lineNumber + 1, manualGetterFunctionSweep ? "GET button" : "manual getter request")
+                ? new GetterDiagnosticSession(documentPath, lineNumber + 1, manualGetterRequestScope ?? (manualGetterButtonRequest ? "GET button" : "manual getter request"))
                 : null;
+            if (manualGetterButtonRequest && !string.IsNullOrWhiteSpace(manualGetterRequestFailureReason))
+            {
+                getterDiagnosticSession?.RecordInfo(manualGetterRequestScope ?? "GET button", manualGetterRequestFailureReason);
+            }
 
             var tokensByLine = new List<LineTokens>();
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
@@ -299,7 +351,10 @@ namespace InlineCppVarDbg
 
                 string lineText = line.GetText();
                 bool scanRegularTokens = lineIndex >= regularStartLineNumber && lineIndex <= regularEndLineNumber;
-                bool scanGetterTokens = lineIndex >= getterStartLineNumber && lineIndex <= getterEndLineNumber;
+                bool isManualGetterLine = manualGetterLineNumbers.Contains(lineIndex);
+                bool scanGetterTokens = watchGetterFunctionSweep
+                    ? lineIndex >= watchGetterStartLineNumber && lineIndex <= watchGetterEndLineNumber
+                    : scanRegularTokens || isManualGetterLine;
                 List<CppCurrentLineTokenizer.IdentifierToken> rawTokens =
                     (scanRegularTokens || scanGetterTokens)
                     ? CppCurrentLineTokenizer.TokenizeIdentifiers(lineText)
@@ -312,6 +367,16 @@ namespace InlineCppVarDbg
                     if (scanGetterTokens && IsPotentialGetterCallToken(lineText, token))
                     {
                         string getterLabel = BuildGetterDiagnosticLabel(lineText, token);
+                        bool isManualGetterExpression = manualGetterRequests.Contains(getterLabel);
+                        bool isManualGetterOnlyLine = isManualGetterLine && !scanRegularTokens && !watchGetterFunctionSweep;
+                        if (!watchGetterFunctionSweep &&
+                            isManualGetterLine &&
+                            !isManualGetterExpression &&
+                            (isManualGetterOnlyLine || !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls)))
+                        {
+                            continue;
+                        }
+
                         if (watchGetterFunctionSweep)
                         {
                             allWatchGetterExpressions.Add(getterLabel);
@@ -333,7 +398,7 @@ namespace InlineCppVarDbg
                         }
                         else if (!TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall, out string getterBindFailureReason))
                         {
-                            bool allowManualRawGetter = manualGetterFunctionSweep || manualGetterRequests.Contains(getterCall.ExpressionText);
+                            bool allowManualRawGetter = manualGetterRequests.Contains(getterCall.ExpressionText);
                             if (allowManualRawGetter)
                             {
                                 getterCalls.Add(getterCall);
@@ -347,7 +412,7 @@ namespace InlineCppVarDbg
                         else
                         {
                             bool allowAutomaticGetter = HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.GetterCalls);
-                            bool allowManualGetter = manualGetterFunctionSweep || manualGetterRequests.Contains(boundGetterCall.ExpressionText);
+                            bool allowManualGetter = manualGetterRequests.Contains(boundGetterCall.ExpressionText);
                             if (allowAutomaticGetter || allowManualGetter)
                             {
                                 getterCalls.Add(boundGetterCall);
@@ -411,6 +476,7 @@ namespace InlineCppVarDbg
 
             if (allTokens.Count == 0 && allGetterCalls.Count == 0 && allMemberAccesses.Count == 0 && allWatchGetterExpressions.Count == 0 && parameterNames.Count == 0)
             {
+                getterDiagnosticSession?.WriteSummary();
                 ITextSnapshotLine startLine = snapshot.GetLineFromLineNumber(coveredStartLineNumber);
                 ITextSnapshotLine endLine = snapshot.GetLineFromLineNumber(coveredEndLineNumber);
                 int spanStart = startLine.Start.Position;
@@ -428,7 +494,7 @@ namespace InlineCppVarDbg
                 {
                     valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     getterValueMap = allGetterCalls.Count > 0
-                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterFunctionSweep, manualGetterRequests, getterDiagnosticSession)
+                        ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterRequests, getterDiagnosticSession)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
                     memberAccessValueMap = allMemberAccesses.Count > 0
                         ? ResolveExpressionValues(context.Debugger, allMemberAccesses, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules)
@@ -808,7 +874,7 @@ namespace InlineCppVarDbg
             return values;
         }
 
-        private static Dictionary<string, string> ResolveGetterValues(
+        private Dictionary<string, string> ResolveGetterValues(
             Debugger debugger,
             List<GetterCallToken> getterCalls,
             InlineValueNumericDisplayMode numericDisplayMode,
@@ -816,7 +882,6 @@ namespace InlineCppVarDbg
             InlineValueRuleKinds ruleKinds,
             InlineValueTypeRuleKinds typeRuleKinds,
             IReadOnlyList<InlineValueCustomRule> customRules,
-            bool allowManualGetterFunctionSweep,
             ISet<string> manualGetterExpressions,
             GetterDiagnosticSession getterDiagnosticSession)
         {
@@ -841,8 +906,39 @@ namespace InlineCppVarDbg
                 }
 
                 bool isManualGetterRequest =
-                    allowManualGetterFunctionSweep ||
-                    (manualGetterExpressions != null && manualGetterExpressions.Contains(getterCall.ExpressionText));
+                    manualGetterExpressions != null && manualGetterExpressions.Contains(getterCall.ExpressionText);
+                if (isManualGetterRequest)
+                {
+                    if (TryGetOrStartAsyncManualGetterValue(
+                        debugger,
+                        getterCall,
+                        numericDisplayMode,
+                        evaluationKinds,
+                        ruleKinds,
+                        typeRuleKinds,
+                        customRules,
+                        out string manualGetterValue,
+                        out string manualGetterFailureReason,
+                        out bool isPending))
+                    {
+                        values[getterCall.ExpressionText] = manualGetterValue;
+                        if (isPending)
+                        {
+                            getterDiagnosticSession?.RecordInfo(getterCall.ExpressionText, "async evaluation is running");
+                        }
+                        else
+                        {
+                            getterDiagnosticSession?.RecordShown(getterCall.ExpressionText);
+                        }
+                    }
+                    else if (!string.IsNullOrWhiteSpace(manualGetterFailureReason))
+                    {
+                        getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, manualGetterFailureReason);
+                    }
+
+                    continue;
+                }
+
                 if (!isManualGetterRequest && !HasEvaluationKind(evaluationKinds, getterCall.EvaluationKind))
                 {
                     getterDiagnosticSession?.RecordSkip(getterCall.ExpressionText, "disabled by current getter evaluation settings");
@@ -905,6 +1001,323 @@ namespace InlineCppVarDbg
 
             return values;
         }
+
+#pragma warning disable VSTHRD001, VSTHRD010, VSTHRD110
+        private bool TryGetOrStartAsyncManualGetterValue(
+            Debugger debugger,
+            GetterCallToken getterCall,
+            InlineValueNumericDisplayMode numericDisplayMode,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules,
+            out string displayValue,
+            out string failureReason,
+            out bool isPending)
+        {
+            displayValue = null;
+            failureReason = null;
+            isPending = false;
+            if (debugger == null || string.IsNullOrWhiteSpace(getterCall.ExpressionText))
+            {
+                failureReason = "debugger or getter expression is unavailable";
+                return false;
+            }
+
+            string key = CreateAsyncManualGetterKey(getterCall);
+            AsyncManualGetterState state;
+            bool shouldStart = false;
+            int generation;
+            lock (asyncManualGetterLock)
+            {
+                generation = asyncManualGetterGeneration;
+                if (!asyncManualGetterStates.TryGetValue(key, out state))
+                {
+                    state = new AsyncManualGetterState(generation);
+                    asyncManualGetterStates[key] = state;
+                    shouldStart = true;
+                }
+
+                if (state.IsCompleted)
+                {
+                    displayValue = state.DisplayValue;
+                    failureReason = state.FailureReason;
+                    return !string.IsNullOrEmpty(displayValue);
+                }
+            }
+
+            if (shouldStart)
+            {
+                StartAsyncManualGetterEvaluation(new AsyncManualGetterRequest(
+                    generation,
+                    key,
+                    debugger,
+                    getterCall,
+                    numericDisplayMode,
+                    evaluationKinds,
+                    ruleKinds,
+                    typeRuleKinds,
+                    customRules?.ToArray() ?? Array.Empty<InlineValueCustomRule>()));
+            }
+
+            displayValue = StatusValueMarker + LoadingValueText;
+            isPending = true;
+            return true;
+        }
+
+        private void StartAsyncManualGetterEvaluation(AsyncManualGetterRequest request)
+        {
+            try
+            {
+                var thread = new System.Threading.Thread(() => EvaluateManualGetterOnBackgroundThread(request))
+                {
+                    IsBackground = true,
+                    Name = "InlineCppVarDbg GET evaluation"
+                };
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+            }
+            catch (Exception ex)
+            {
+                CompleteAsyncManualGetterEvaluation(request, null, "could not start async getter evaluation: " + ex.Message, 0);
+            }
+        }
+
+        private void EvaluateManualGetterOnBackgroundThread(AsyncManualGetterRequest request)
+        {
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            string displayValue = null;
+            string failureReason = null;
+            try
+            {
+                bool usesDirectGetterCall = string.Equals(
+                    request.GetterCall.EvaluationExpressionText,
+                    request.GetterCall.ExpressionText,
+                    StringComparison.Ordinal);
+                EnvDTE.Expression expression = request.Debugger.GetExpression(
+                    request.GetterCall.EvaluationExpressionText,
+                    false,
+                    ManualGetterEvaluationTimeoutMs);
+                if (expression == null || !expression.IsValidValue)
+                {
+                    failureReason = usesDirectGetterCall
+                        ? "debugger could not evaluate the full getter call"
+                        : "debugger could not evaluate the bound getter expression";
+                }
+                else
+                {
+                    string normalized = NormalizeValue(expression.Value);
+                    if (string.IsNullOrEmpty(normalized))
+                    {
+                        failureReason = "debugger returned an empty value";
+                    }
+                    else if (!IsDisplayableGetterReturnType(expression.Type, expression.Value, normalized))
+                    {
+                        failureReason = "return type '" + NormalizeTypeForDiagnostic(expression.Type) + "' is not displayable inline";
+                    }
+                    else if (!TryFormatEligibleValueWithoutUiThread(
+                        request.GetterCall.EvaluationExpressionText,
+                        expression.Type,
+                        expression.Value,
+                        normalized,
+                        request.NumericDisplayMode,
+                        request.EvaluationKinds,
+                        request.RuleKinds,
+                        request.TypeRuleKinds,
+                        request.CustomRules,
+                        out displayValue))
+                    {
+                        failureReason = "filtered by current type or rule settings for return type '" + NormalizeTypeForDiagnostic(expression.Type) + "'";
+                    }
+                }
+            }
+            catch (COMException ex)
+            {
+                failureReason = "debugger COM error 0x" + ex.ErrorCode.ToString("X8", CultureInfo.InvariantCulture);
+            }
+            catch (Exception ex)
+            {
+                failureReason = "debugger evaluation error: " + ex.Message;
+            }
+            finally
+            {
+                stopwatch.Stop();
+                CompleteAsyncManualGetterEvaluation(request, displayValue, failureReason, stopwatch.ElapsedMilliseconds);
+            }
+        }
+
+        private void CompleteAsyncManualGetterEvaluation(
+            AsyncManualGetterRequest request,
+            string displayValue,
+            string failureReason,
+            long elapsedMs)
+        {
+            bool shouldNotify = false;
+            lock (asyncManualGetterLock)
+            {
+                if (request.Generation == asyncManualGetterGeneration &&
+                    asyncManualGetterStates.TryGetValue(request.Key, out AsyncManualGetterState state) &&
+                    !state.IsCompleted)
+                {
+                    state.IsCompleted = true;
+                    state.DisplayValue = displayValue;
+                    state.FailureReason = failureReason;
+                    shouldNotify = true;
+                }
+            }
+
+            if (!shouldNotify || disposed || textView.IsClosed)
+            {
+                return;
+            }
+
+            _ = textView.VisualElement.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (disposed || textView.IsClosed)
+                {
+                    return;
+                }
+
+                Invalidate();
+                if (elapsedMs >= RequestedProfileLogThresholdMs)
+                {
+                    WritePerfMessage(
+                        "InlineCppVarDbg ASYNC GET expression=" +
+                        request.GetterCall.ExpressionText +
+                        " elapsed=" +
+                        elapsedMs.ToString(CultureInfo.InvariantCulture) +
+                        "ms result=" +
+                        (string.IsNullOrEmpty(displayValue) ? "not-shown" : "shown") +
+                        (string.IsNullOrWhiteSpace(failureReason) ? string.Empty : " reason=" + failureReason));
+                }
+            }));
+        }
+
+        private static string CreateAsyncManualGetterKey(GetterCallToken getterCall)
+        {
+            return (getterCall.ExpressionText ?? string.Empty) + "\u001f" + (getterCall.EvaluationExpressionText ?? string.Empty);
+        }
+
+        private static bool TryFormatEligibleValueWithoutUiThread(
+            string evalExpressionName,
+            string type,
+            string rawValue,
+            string normalizedValue,
+            InlineValueNumericDisplayMode numericDisplayMode,
+            InlineValueEvaluationKinds evaluationKinds,
+            InlineValueRuleKinds ruleKinds,
+            InlineValueTypeRuleKinds typeRuleKinds,
+            IReadOnlyList<InlineValueCustomRule> customRules,
+            out string displayValue)
+        {
+            displayValue = normalizedValue;
+            if (string.IsNullOrEmpty(normalizedValue))
+            {
+                return false;
+            }
+
+            CustomRuleDecision customRuleDecision = GetCustomRuleDecision(customRules, type, evalExpressionName);
+            if (customRuleDecision == CustomRuleDecision.Hide)
+            {
+                return false;
+            }
+
+            bool forceShow = customRuleDecision == CustomRuleDecision.Show;
+            if (TryFormatNullPointerValue(type, rawValue, normalizedValue, out string nullDisplay))
+            {
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.NullPointers) ||
+                    !IsDetailedPointerTypeEnabled(type, rawValue, normalizedValue, typeRuleKinds, allowUnknownKinds: true)))
+                {
+                    return false;
+                }
+
+                displayValue = nullDisplay;
+            }
+            else if (IsSuppressiblePointerType(type))
+            {
+                InlineValueTypeRuleKinds pointerRuleKind = GetPointerTypeRuleKind(type, rawValue, normalizedValue);
+                if (pointerRuleKind == InlineValueTypeRuleKinds.None ||
+                    (!forceShow && !IsPointerRuleEnabled(pointerRuleKind, evaluationKinds, ruleKinds, typeRuleKinds)))
+                {
+                    return false;
+                }
+            }
+            else if (IsArrayType(type))
+            {
+                InlineValueTypeRuleKinds arrayRuleKind = GetArrayTypeRuleKind(type, rawValue, normalizedValue);
+                if (!forceShow && !IsArrayRuleEnabled(arrayRuleKind, evaluationKinds, typeRuleKinds))
+                {
+                    return false;
+                }
+            }
+            else if (TryFormatUninitializedValue(type, rawValue, normalizedValue, out string uninitializedDisplay))
+            {
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.UninitializedValues) ||
+                    !HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars)))
+                {
+                    return false;
+                }
+
+                displayValue = uninitializedDisplay;
+            }
+            else if (TryFormatBooleanValue(type, rawValue, normalizedValue, out string boolDisplay))
+            {
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
+                {
+                    return false;
+                }
+
+                displayValue = boolDisplay;
+            }
+            else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
+            {
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.Enums) ||
+                    !HasTypeRuleKind(typeRuleKinds, InlineValueTypeRuleKinds.EnumValues)))
+                {
+                    return false;
+                }
+            }
+            else if (TryFormatNumericValue(numericDisplayMode, type, normalizedValue, out string numericDisplay))
+            {
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
+                {
+                    return false;
+                }
+
+                displayValue = numericDisplay;
+            }
+            else if (IsDisplayableScalarType(type))
+            {
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(displayValue))
+            {
+                return false;
+            }
+
+            return !ShouldSuppressValue(type, rawValue, displayValue, evaluationKinds, ruleKinds, typeRuleKinds, forceShow);
+        }
+#pragma warning restore VSTHRD001, VSTHRD010, VSTHRD110
 
         private static Dictionary<string, string> ResolveExpressionValues(
             Debugger debugger,
@@ -4526,6 +4939,11 @@ namespace InlineCppVarDbg
                 return ValueDisplayKind.Uninitialized;
             }
 
+            if (value.StartsWith(StatusValueMarker, StringComparison.Ordinal))
+            {
+                return ValueDisplayKind.Status;
+            }
+
             return ValueDisplayKind.Normal;
         }
 
@@ -4544,6 +4962,11 @@ namespace InlineCppVarDbg
             if (value.StartsWith(UninitializedValueMarker, StringComparison.Ordinal))
             {
                 return value.Substring(UninitializedValueMarker.Length);
+            }
+
+            if (value.StartsWith(StatusValueMarker, StringComparison.Ordinal))
+            {
+                return value.Substring(StatusValueMarker.Length);
             }
 
             return value;
@@ -5838,31 +6261,14 @@ namespace InlineCppVarDbg
                 allowCharProbing: false);
         }
 
-        private EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount, bool manualVariableFunctionSweep, bool manualGetterFunctionSweep)
+        private EvaluationPolicy CreateEvaluationPolicy(int configuredPreviousLineCount, bool manualVariableFunctionSweep)
         {
-            if (manualGetterFunctionSweep)
-            {
-                return CreateManualGetterSweepPolicy(configuredPreviousLineCount);
-            }
-
             if (manualVariableFunctionSweep)
             {
                 return CreateManualFunctionSweepPolicy(configuredPreviousLineCount);
             }
 
             return CreateStandardEvaluationPolicy(configuredPreviousLineCount);
-        }
-
-        private static EvaluationPolicy CreateManualGetterSweepPolicy(int configuredPreviousLineCount)
-        {
-            int clampedPreviousLines = Math.Max(0, configuredPreviousLineCount);
-            return new EvaluationPolicy(
-                previousLineCount: clampedPreviousLines,
-                perExpressionTimeoutMs: ManualGetterEvaluationTimeoutMs,
-                allowFallbackExpressions: true,
-                allowDataMemberRecursion: false,
-                allowArrayProbing: false,
-                allowCharProbing: false);
         }
 
         private static bool ShouldAbortEvaluation()
@@ -5937,7 +6343,13 @@ namespace InlineCppVarDbg
             PerfSession session = currentPerfSession;
             if (session != null)
             {
-                timeout = Math.Min(timeout, session.Policy.PerExpressionTimeoutMs);
+                bool isManualGetterEvaluation =
+                    timeout == ManualGetterEvaluationTimeoutMs &&
+                    phase.StartsWith("Getter.", StringComparison.Ordinal);
+                if (!isManualGetterEvaluation)
+                {
+                    timeout = Math.Min(timeout, session.Policy.PerExpressionTimeoutMs);
+                }
             }
 
             Stopwatch stopwatch = Stopwatch.StartNew();
@@ -6158,10 +6570,139 @@ namespace InlineCppVarDbg
             return border;
         }
 
-        private bool TryResolveManualGetterRequest(Point mousePosition, out string expressionText)
+        private bool TryCollectManualGetterRequestsFromSelection(
+            ITextSnapshot snapshot,
+            DebuggerBridge.BreakContext context,
+            ISet<string> getterRequests,
+            ISet<int> getterLineNumbers)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!settings.IsEnabled ||
+                snapshot == null ||
+                getterRequests == null ||
+                getterLineNumbers == null ||
+                textView.Selection == null ||
+                textView.Selection.IsEmpty)
+            {
+                return false;
+            }
+
+            if (!PathsEqual(normalizedDocumentPath, NormalizePath(context.FileName)))
+            {
+                return false;
+            }
+
+            bool hadSelection = false;
+            foreach (SnapshotSpan selectedSpan in textView.Selection.SelectedSpans)
+            {
+                if (selectedSpan.IsEmpty)
+                {
+                    continue;
+                }
+
+                SnapshotSpan span = selectedSpan;
+                if (span.Snapshot != snapshot)
+                {
+                    if (span.Snapshot?.TextBuffer != snapshot.TextBuffer)
+                    {
+                        continue;
+                    }
+
+                    span = span.TranslateTo(snapshot, SpanTrackingMode.EdgeInclusive);
+                }
+
+                if (span.IsEmpty)
+                {
+                    continue;
+                }
+
+                hadSelection = true;
+                CollectManualGetterRequestsFromSpan(snapshot, span, getterRequests, getterLineNumbers);
+            }
+
+            return hadSelection;
+        }
+
+        private static void CollectManualGetterRequestsFromSpan(
+            ITextSnapshot snapshot,
+            SnapshotSpan span,
+            ISet<string> getterRequests,
+            ISet<int> getterLineNumbers)
+        {
+            int startPosition = Math.Max(0, Math.Min(snapshot.Length, span.Start.Position));
+            int endPosition = Math.Max(0, Math.Min(snapshot.Length, span.End.Position));
+            if (endPosition <= startPosition)
+            {
+                return;
+            }
+
+            int lastSelectedPosition = Math.Max(startPosition, endPosition - 1);
+            int startLineNumber = snapshot.GetLineFromPosition(startPosition).LineNumber;
+            int endLineNumber = snapshot.GetLineFromPosition(lastSelectedPosition).LineNumber;
+            for (int lineNumber = startLineNumber; lineNumber <= endLineNumber; lineNumber++)
+            {
+                ITextSnapshotLine line = snapshot.GetLineFromLineNumber(lineNumber);
+                string lineText = line.GetText();
+                int selectionStartOffset = Math.Max(0, startPosition - line.Start.Position);
+                int selectionEndOffset = Math.Min(lineText.Length, endPosition - line.Start.Position);
+                if (selectionEndOffset <= selectionStartOffset)
+                {
+                    continue;
+                }
+
+                List<CppCurrentLineTokenizer.IdentifierToken> tokens = CppCurrentLineTokenizer.TokenizeIdentifiers(lineText);
+                foreach (CppCurrentLineTokenizer.IdentifierToken token in tokens)
+                {
+                    if (!IsPotentialGetterCallToken(lineText, token) ||
+                        !TryFindGetterCallSpan(lineText, token, out _, out int getterStart, out int getterEnd) ||
+                        getterStart >= selectionEndOffset ||
+                        getterEnd <= selectionStartOffset)
+                    {
+                        continue;
+                    }
+
+                    if (TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out _))
+                    {
+                        getterRequests.Add(getterCall.ExpressionText);
+                        getterLineNumbers.Add(lineNumber);
+                    }
+                }
+            }
+        }
+
+        private bool TryResolveManualGetterRequestAtCaret(
+            ITextSnapshot snapshot,
+            DebuggerBridge.BreakContext context,
+            out string expressionText,
+            out int lineNumber)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             expressionText = null;
+            lineNumber = -1;
+            if (!settings.IsEnabled || snapshot == null)
+            {
+                return false;
+            }
+
+            SnapshotPoint bufferPoint = textView.Caret.Position.BufferPosition;
+            if (bufferPoint.Snapshot != snapshot)
+            {
+                if (bufferPoint.Snapshot?.TextBuffer != snapshot.TextBuffer)
+                {
+                    return false;
+                }
+
+                bufferPoint = bufferPoint.TranslateTo(snapshot, PointTrackingMode.Positive);
+            }
+
+            return TryResolveManualGetterRequestAtPoint(snapshot, context, bufferPoint, out expressionText, out lineNumber);
+        }
+
+        private bool TryResolveManualGetterRequest(Point mousePosition, out string expressionText, out int lineNumber)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            expressionText = null;
+            lineNumber = -1;
             if (!settings.IsEnabled || !debuggerBridge.TryGetCurrentBreakContext(out DebuggerBridge.BreakContext context))
             {
                 return false;
@@ -6180,34 +6721,59 @@ namespace InlineCppVarDbg
             }
 
             ITextSnapshot snapshot = bufferPoint.Value.Snapshot;
+            return TryResolveManualGetterRequestAtPoint(snapshot, context, bufferPoint.Value, out expressionText, out lineNumber);
+        }
+
+        private bool TryResolveManualGetterRequestAtPoint(
+            ITextSnapshot snapshot,
+            DebuggerBridge.BreakContext context,
+            SnapshotPoint bufferPoint,
+            out string expressionText,
+            out int lineNumber)
+        {
+            expressionText = null;
+            lineNumber = -1;
+            if (snapshot == null)
+            {
+                return false;
+            }
+
+            if (bufferPoint.Snapshot != snapshot)
+            {
+                if (bufferPoint.Snapshot?.TextBuffer != snapshot.TextBuffer)
+                {
+                    return false;
+                }
+
+                bufferPoint = bufferPoint.TranslateTo(snapshot, PointTrackingMode.Positive);
+            }
+
             if (!PathsEqual(normalizedDocumentPath, NormalizePath(context.FileName)))
             {
                 return false;
             }
 
-            ITextSnapshotLine snapshotLine = bufferPoint.Value.GetContainingLine();
-            if (snapshotLine.LineNumber > context.LineNumber - 1)
-            {
-                return false;
-            }
-
+            ITextSnapshotLine snapshotLine = bufferPoint.GetContainingLine();
             string lineText = snapshotLine.GetText();
-            int lineOffset = bufferPoint.Value.Position - snapshotLine.Start.Position;
+            int lineOffset = Math.Max(0, Math.Min(lineText.Length, bufferPoint.Position - snapshotLine.Start.Position));
             List<CppCurrentLineTokenizer.IdentifierToken> tokens = CppCurrentLineTokenizer.TokenizeIdentifiers(lineText);
             foreach (CppCurrentLineTokenizer.IdentifierToken token in tokens)
             {
-                if (lineOffset < token.Start || lineOffset > token.Start + token.Length)
+                if (!IsPotentialGetterCallToken(lineText, token) ||
+                    !TryFindGetterCallSpan(lineText, token, out _, out int getterStart, out int getterEnd) ||
+                    lineOffset < getterStart ||
+                    lineOffset > getterEnd)
                 {
                     continue;
                 }
 
-                if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out _) ||
-                    !TryBindVisibleDirectReturnGetter(snapshot, getterCall, out GetterCallToken boundGetterCall, out _))
+                if (!TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out _))
                 {
                     return false;
                 }
 
-                expressionText = boundGetterCall.ExpressionText;
+                expressionText = getterCall.ExpressionText;
+                lineNumber = snapshotLine.LineNumber;
                 return true;
             }
 
@@ -6216,6 +6782,7 @@ namespace InlineCppVarDbg
 
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
         {
+            ClearManualGetterRequestsAndAsyncState();
             Invalidate();
         }
 
@@ -6232,12 +6799,13 @@ namespace InlineCppVarDbg
             }
 
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (!TryResolveManualGetterRequest(e.GetPosition(textView.VisualElement), out string expressionText))
+            if (!TryResolveManualGetterRequest(e.GetPosition(textView.VisualElement), out string expressionText, out int lineNumber))
             {
                 return;
             }
 
             manualGetterRequests.Add(expressionText);
+            manualGetterRequestLineNumbers.Add(lineNumber);
             debuggerBridge.RequestGetterDiagnosticsForNextEvaluation();
             Invalidate();
             e.Handled = true;
@@ -6245,14 +6813,26 @@ namespace InlineCppVarDbg
 
         private void OnDebugStateChanged(object sender, EventArgs e)
         {
-            manualGetterRequests.Clear();
+            ClearManualGetterRequestsAndAsyncState();
             Invalidate();
         }
 
         private void OnSettingsChanged(object sender, EventArgs e)
         {
             UpdateAppearanceSettings();
+            ClearManualGetterRequestsAndAsyncState();
             Invalidate();
+        }
+
+        private void ClearManualGetterRequestsAndAsyncState()
+        {
+            manualGetterRequests.Clear();
+            manualGetterRequestLineNumbers.Clear();
+            lock (asyncManualGetterLock)
+            {
+                asyncManualGetterStates.Clear();
+                asyncManualGetterGeneration++;
+            }
         }
 
         private void Invalidate()
@@ -6864,6 +7444,54 @@ namespace InlineCppVarDbg
                     CallEnd,
                     EvaluationKind);
             }
+        }
+
+        private sealed class AsyncManualGetterState
+        {
+            public AsyncManualGetterState(int generation)
+            {
+                Generation = generation;
+            }
+
+            public int Generation { get; }
+            public bool IsCompleted { get; set; }
+            public string DisplayValue { get; set; }
+            public string FailureReason { get; set; }
+        }
+
+        private readonly struct AsyncManualGetterRequest
+        {
+            public AsyncManualGetterRequest(
+                int generation,
+                string key,
+                Debugger debugger,
+                GetterCallToken getterCall,
+                InlineValueNumericDisplayMode numericDisplayMode,
+                InlineValueEvaluationKinds evaluationKinds,
+                InlineValueRuleKinds ruleKinds,
+                InlineValueTypeRuleKinds typeRuleKinds,
+                IReadOnlyList<InlineValueCustomRule> customRules)
+            {
+                Generation = generation;
+                Key = key;
+                Debugger = debugger;
+                GetterCall = getterCall;
+                NumericDisplayMode = numericDisplayMode;
+                EvaluationKinds = evaluationKinds;
+                RuleKinds = ruleKinds;
+                TypeRuleKinds = typeRuleKinds;
+                CustomRules = customRules ?? Array.Empty<InlineValueCustomRule>();
+            }
+
+            public int Generation { get; }
+            public string Key { get; }
+            public Debugger Debugger { get; }
+            public GetterCallToken GetterCall { get; }
+            public InlineValueNumericDisplayMode NumericDisplayMode { get; }
+            public InlineValueEvaluationKinds EvaluationKinds { get; }
+            public InlineValueRuleKinds RuleKinds { get; }
+            public InlineValueTypeRuleKinds TypeRuleKinds { get; }
+            public IReadOnlyList<InlineValueCustomRule> CustomRules { get; }
         }
 
         private enum ValueDisplayKind

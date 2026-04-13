@@ -49,7 +49,7 @@ namespace InlineCppVarDbg
                 bridge.RequestGetterDiagnosticsForNextEvaluation();
             }
 
-            bridge.RequestManualGetterFunctionSweep();
+            bridge.RequestManualGetterAtCaret();
         }
 
         private void AddCommand(OleMenuCommandService commandService, int commandId)

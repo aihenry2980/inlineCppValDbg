@@ -131,6 +131,12 @@ namespace InlineCppVarDbg
             IncrementVersionAndNotify();
         }
 
+        public void RequestManualGetterAtCaret()
+        {
+            Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 1);
+            IncrementVersionAndNotify();
+        }
+
         public void RequestGetterDiagnosticsForNextEvaluation()
         {
             Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 1);
@@ -160,6 +166,11 @@ namespace InlineCppVarDbg
         public bool TryConsumeGetterDiagnosticsForNextEvaluation()
         {
             return Interlocked.Exchange(ref getterDiagnosticsNextEvaluationRequested, 0) != 0;
+        }
+
+        public bool TryConsumeManualGetterAtCaretRequest()
+        {
+            return Interlocked.Exchange(ref manualGetterFunctionSweepRequested, 0) != 0;
         }
 
         public bool TryConsumeWatchGetterFunctionSweep()
