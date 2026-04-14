@@ -57,7 +57,7 @@
         <Strings>
           <ButtonText>GET</ButtonText>
           <MenuText>Evaluate Get/Is At Caret Or Selection</MenuText>
-          <ToolTipText>Evaluate Get/Is under the caret, or every Get/Is call in the selected text. Shortcut: Alt+Q in Text Editor.</ToolTipText>
+          <ToolTipText>Evaluate Get/Is under the caret, or every Get/Is call in the selected text. Shortcut: Shift+F12 in Text Editor.</ToolTipText>
         </Strings>
       </Button>
 
@@ -93,7 +93,7 @@
   </CommandPlacements>
 
   <KeyBindings>
-    <KeyBinding guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateGetterValuesInFunction" editor="GUID_TextEditorFactory" key1="Q" mod1="ALT" />
+    <KeyBinding guid="guidInlineCppVarDbgCmdSet" id="cmdidEvaluateGetterValuesInFunction" editor="GUID_TextEditorFactory" key1="F12" mod1="SHIFT" />
   </KeyBindings>
 
   <Symbols>

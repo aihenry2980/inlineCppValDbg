@@ -19,7 +19,7 @@ namespace InlineCppVarDbg
             "ON/off: Toggles the whole inline value extension on or off. When it shows ON/off, inline values are enabled. When it shows on/OFF, they are paused.\r\n\r\n" +
             "IN/end: Toggles where the value chips appear. IN/end means values are shown inline beside the variable/expression. in/END means values are moved to the end of the source line.\r\n\r\n" +
             "h/D/b: Cycles numeric display format. The capital letter is the current mode: h/D/b is decimal, H/d/b is hex, and h/d/B is binary.\r\n\r\n" +
-            "GET: Manually evaluates the Get*() / Is*() call under the editor caret, or every Get*() / Is*() call in the selected text. Shortcut: Alt+Q in Text Editor. Ctrl+click GET tries to add getter expressions to the Visual Studio Watch window instead.\r\n\r\n" +
+            "GET: Manually evaluates the Get*() / Is*() call under the editor caret, or every Get*() / Is*() call in the selected text. Shortcut: Shift+F12 in Text Editor. Ctrl+click GET tries to add getter expressions to the Visual Studio Watch window instead.\r\n\r\n" +
             "ALL: Manually evaluates all eligible variables in the current function for the current break state, beyond the normal nearby/current-line budget. Useful when you want more context, but it may be slower.\r\n\r\n" +
             "CFG: Opens this extension options page, where you can enable/disable evaluation categories and type rules like pointers, arrays, structs, char arrays, numeric formats, colors, and placement.";
         private const InlineValueTypeRuleKinds DefaultTypeRuleKinds =

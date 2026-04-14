@@ -48,6 +48,7 @@ namespace InlineCppVarDbg
         {
             "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t", "short", "int", "long",
             "float", "double", "void", "__int8", "__int16", "__int32", "__int64",
+            "int8", "int16", "int32", "int64",
             "int8_t", "int16_t", "int32_t", "int64_t",
             "uint8", "uint16", "uint32", "uint64",
             "uint8_t", "uint16_t", "uint32_t", "uint64_t",
@@ -1274,6 +1275,18 @@ namespace InlineCppVarDbg
 
                 displayValue = boolDisplay;
             }
+            else if (TryFormatEightBitIntegerValue(numericDisplayMode, type, rawValue, normalizedValue, out string eightBitDisplay))
+            {
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
+                {
+                    return false;
+                }
+
+                displayValue = eightBitDisplay;
+            }
             else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
             {
                 if (!forceShow &&
@@ -1696,6 +1709,81 @@ namespace InlineCppVarDbg
             }
 
             return TryFormatNumericLiteral(numericDisplayMode, normalizedValue, out displayValue);
+        }
+
+        private static bool TryFormatEightBitIntegerValue(
+            InlineValueNumericDisplayMode numericDisplayMode,
+            string type,
+            string rawValue,
+            string normalizedValue,
+            out string displayValue)
+        {
+            displayValue = normalizedValue;
+            if (!IsEightBitIntegralScalarType(type))
+            {
+                return false;
+            }
+
+            if (!TryParseEightBitIntegerValue(rawValue, normalizedValue, out long numericValue))
+            {
+                return false;
+            }
+
+            if (numericValue < -128 || numericValue > 255)
+            {
+                return false;
+            }
+
+            int byteValue = (int)(((numericValue % 256) + 256) % 256);
+            string numericDisplay = numericValue.ToString(CultureInfo.InvariantCulture);
+            if (numericDisplayMode != InlineValueNumericDisplayMode.Decimal)
+            {
+                TryFormatNumericLiteral(numericDisplayMode, numericDisplay, out numericDisplay);
+            }
+
+            displayValue = "'" + EscapeEightBitCharForChip(byteValue) + "'(" + numericDisplay + ")";
+            return true;
+        }
+
+        private static bool TryParseEightBitIntegerValue(string rawValue, string normalizedValue, out long numericValue)
+        {
+            string normalizedLeadingToken = ExtractLeadingToken(normalizedValue);
+            if (TryParseSignedInteger(normalizedLeadingToken, out numericValue) ||
+                TryParseSignedInteger(normalizedValue, out numericValue))
+            {
+                return true;
+            }
+
+            string rawLeadingToken = ExtractLeadingToken(rawValue);
+            return TryParseSignedInteger(rawLeadingToken, out numericValue) ||
+                   TryParseSignedInteger(rawValue, out numericValue);
+        }
+
+        private static string EscapeEightBitCharForChip(int byteValue)
+        {
+            char ch = (char)byteValue;
+            switch (ch)
+            {
+                case '\0':
+                    return "\\0";
+                case '\n':
+                    return "\\n";
+                case '\r':
+                    return "\\r";
+                case '\t':
+                    return "\\t";
+                case '\'':
+                    return "\\'";
+                case '\\':
+                    return "\\\\";
+            }
+
+            if (byteValue >= 32 && byteValue <= 126)
+            {
+                return ch.ToString();
+            }
+
+            return "\\x" + byteValue.ToString("X2", CultureInfo.InvariantCulture);
         }
 
         private static bool TryFormatBooleanValue(string type, string rawValue, string normalizedValue, out string displayValue)
@@ -2186,9 +2274,13 @@ namespace InlineCppVarDbg
             }
 
             return ContainsTypeWord(typeLower, "int8_t") ||
+                   ContainsTypeWord(typeLower, "int8") ||
                    ContainsTypeWord(typeLower, "int16_t") ||
+                   ContainsTypeWord(typeLower, "int16") ||
                    ContainsTypeWord(typeLower, "int32_t") ||
+                   ContainsTypeWord(typeLower, "int32") ||
                    ContainsTypeWord(typeLower, "int64_t") ||
+                   ContainsTypeWord(typeLower, "int64") ||
                    ContainsTypeWord(typeLower, "uint8") ||
                    ContainsTypeWord(typeLower, "uint16") ||
                    ContainsTypeWord(typeLower, "uint32") ||
@@ -2197,6 +2289,30 @@ namespace InlineCppVarDbg
                    ContainsTypeWord(typeLower, "uint16_t") ||
                    ContainsTypeWord(typeLower, "uint32_t") ||
                    ContainsTypeWord(typeLower, "uint64_t");
+        }
+
+        private static bool IsEightBitIntegralScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type) || !IsIntegralScalarType(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            if (ContainsTypeWord(lower, "char") ||
+                ContainsTypeWord(lower, "char8_t") ||
+                ContainsTypeWord(lower, "char16_t") ||
+                ContainsTypeWord(lower, "char32_t") ||
+                ContainsTypeWord(lower, "wchar_t"))
+            {
+                return false;
+            }
+
+            return ContainsTypeWord(lower, "int8") ||
+                   ContainsTypeWord(lower, "int8_t") ||
+                   ContainsTypeWord(lower, "uint8") ||
+                   ContainsTypeWord(lower, "uint8_t") ||
+                   ContainsTypeWord(lower, "__int8");
         }
 
         private static bool LooksLikeEnumSymbolValue(string rawValue, string normalizedValue)
@@ -2347,6 +2463,18 @@ namespace InlineCppVarDbg
                 }
 
                 displayValue = boolDisplay;
+            }
+            else if (TryFormatEightBitIntegerValue(numericDisplayMode, type, rawValue, normalizedValue, out string eightBitDisplay))
+            {
+                InlineValueTypeRuleKinds scalarRuleKind = GetScalarTypeRuleKind(type);
+                if (!forceShow &&
+                    (!HasEvaluationKind(evaluationKinds, InlineValueEvaluationKinds.BasicScalars) ||
+                    !HasTypeRuleKind(typeRuleKinds, scalarRuleKind)))
+                {
+                    return false;
+                }
+
+                displayValue = eightBitDisplay;
             }
             else if (IsDisplayableEnumType(type, rawValue, normalizedValue))
             {
