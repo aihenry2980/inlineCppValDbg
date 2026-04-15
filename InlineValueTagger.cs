@@ -340,6 +340,7 @@ namespace InlineCppVarDbg
             var allTokens = new List<CppCurrentLineTokenizer.IdentifierToken>();
             var allGetterCalls = new List<GetterCallToken>();
             var allMemberAccesses = new List<GetterCallToken>();
+            var sourceTypeHints = new Dictionary<string, string>(StringComparer.Ordinal);
             var allWatchGetterExpressions = new List<string>();
             var watchGetterSpans = new Dictionary<string, SnapshotSpan>(StringComparer.Ordinal);
             for (int lineIndex = coveredStartLineNumber; lineIndex <= coveredEndLineNumber; lineIndex++)
@@ -466,6 +467,7 @@ namespace InlineCppVarDbg
                 allTokens.AddRange(tokens);
                 allGetterCalls.AddRange(getterCalls);
                 allMemberAccesses.AddRange(memberAccesses);
+                AddSourceTypeHints(lineText, tokens, sourceTypeHints);
             }
 
             if (watchGetterFunctionSweep)
@@ -493,7 +495,7 @@ namespace InlineCppVarDbg
                 currentPerfSession = perfSession;
                 try
                 {
-                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                    valueMap = ResolveValues(context.Debugger, context.StackFrame, allTokens, parameterNames, sourceTypeHints, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     getterValueMap = allGetterCalls.Count > 0
                         ? ResolveGetterValues(context.Debugger, allGetterCalls, numericDisplayMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules, manualGetterRequests, getterDiagnosticSession)
                         : new Dictionary<string, string>(StringComparer.Ordinal);
@@ -794,6 +796,7 @@ namespace InlineCppVarDbg
             StackFrame2 stackFrame,
             List<CppCurrentLineTokenizer.IdentifierToken> tokens,
             HashSet<string> extraRequiredIdentifiers,
+            IReadOnlyDictionary<string, string> sourceTypeHints,
             InlineValueNumericDisplayMode numericDisplayMode,
             InlineValueEvaluationKinds evaluationKinds,
             InlineValueRuleKinds ruleKinds,
@@ -818,7 +821,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions locals = stackFrame.Locals2[true];
                 RecordPerf("StackFrame.Locals2", "Locals2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, locals, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                AddExpressionValues(values, locals, requiredIdentifiers, sourceTypeHints, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
             }
             catch (COMException)
             {
@@ -834,7 +837,7 @@ namespace InlineCppVarDbg
                 Stopwatch stopwatch = Stopwatch.StartNew();
                 Expressions arguments = stackFrame.Arguments2[true];
                 RecordPerf("StackFrame.Arguments2", "Arguments2[true]", stopwatch.ElapsedMilliseconds);
-                AddExpressionValues(values, arguments, requiredIdentifiers, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                AddExpressionValues(values, arguments, requiredIdentifiers, sourceTypeHints, 0, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
             }
             catch (COMException)
             {
@@ -864,7 +867,7 @@ namespace InlineCppVarDbg
                     EnvDTE.Expression expression = TimedGetExpression(debugger, identifier, 50, "Fallback.GetExpression");
                     if (expression != null && expression.IsValidValue)
                     {
-                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                        TryAddExpressionValue(values, identifier, expression.Type, expression.Value, requiredIdentifiers, sourceTypeHints, debugger, numericDisplayMode, EnumValueRenderMode.IntegerOnly, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     }
                 }
                 catch (COMException)
@@ -873,6 +876,141 @@ namespace InlineCppVarDbg
             }
 
             return values;
+        }
+
+        private static void AddSourceTypeHints(
+            string lineText,
+            List<CppCurrentLineTokenizer.IdentifierToken> tokens,
+            Dictionary<string, string> sourceTypeHints)
+        {
+            if (string.IsNullOrWhiteSpace(lineText) || tokens == null || sourceTypeHints == null)
+            {
+                return;
+            }
+
+            foreach (CppCurrentLineTokenizer.IdentifierToken token in tokens)
+            {
+                if (sourceTypeHints.ContainsKey(token.Name))
+                {
+                    continue;
+                }
+
+                if (TryInferSourceFixedWidthTypeForToken(lineText, token, out string sourceType))
+                {
+                    sourceTypeHints[token.Name] = sourceType;
+                }
+            }
+        }
+
+        private static bool TryInferSourceFixedWidthTypeForToken(
+            string lineText,
+            CppCurrentLineTokenizer.IdentifierToken token,
+            out string sourceType)
+        {
+            sourceType = null;
+            if (string.IsNullOrWhiteSpace(lineText) || token.Start <= 0 || token.Start > lineText.Length)
+            {
+                return false;
+            }
+
+            int segmentStart = FindSourceDeclarationSegmentStart(lineText, token.Start);
+            if (segmentStart >= token.Start)
+            {
+                return false;
+            }
+
+            string prefix = lineText.Substring(segmentStart, token.Start - segmentStart);
+            List<CppCurrentLineTokenizer.IdentifierToken> prefixTokens = CppCurrentLineTokenizer.TokenizeIdentifiers(prefix);
+            for (int i = prefixTokens.Count - 1; i >= 0; i--)
+            {
+                string candidate = prefixTokens[i].Name;
+                if (IsFixedWidthSourceTypeName(candidate))
+                {
+                    string tail = prefix.Substring(prefixTokens[i].Start + prefixTokens[i].Length);
+                    if (tail.IndexOf('*') >= 0 || tail.IndexOf('&') >= 0)
+                    {
+                        return false;
+                    }
+
+                    sourceType = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static int FindSourceDeclarationSegmentStart(string lineText, int tokenStart)
+        {
+            for (int i = tokenStart - 1; i >= 0; i--)
+            {
+                char ch = lineText[i];
+                if (ch == ';' ||
+                    ch == '{' ||
+                    ch == '}' ||
+                    ch == '(' ||
+                    ch == '=' ||
+                    ch == '+' ||
+                    ch == '-' ||
+                    ch == '/' ||
+                    ch == '<' ||
+                    ch == '>' ||
+                    ch == '!' ||
+                    ch == '?' ||
+                    ch == ':' ||
+                    ch == '|' ||
+                    ch == '^' ||
+                    ch == '~' ||
+                    ch == '[' ||
+                    ch == ']')
+                {
+                    return i + 1;
+                }
+            }
+
+            return 0;
+        }
+
+        private static string GetSourceTypeHint(
+            IReadOnlyDictionary<string, string> sourceTypeHints,
+            string name,
+            string simpleName)
+        {
+            if (sourceTypeHints == null)
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(name) &&
+                sourceTypeHints.TryGetValue(name, out string exactType) &&
+                IsFixedWidthSourceTypeName(exactType))
+            {
+                return exactType;
+            }
+
+            if (!string.IsNullOrWhiteSpace(simpleName) &&
+                sourceTypeHints.TryGetValue(simpleName, out string simpleType) &&
+                IsFixedWidthSourceTypeName(simpleType))
+            {
+                return simpleType;
+            }
+
+            return null;
+        }
+
+        private static bool IsFixedWidthSourceTypeName(string sourceType)
+        {
+            if (string.IsNullOrWhiteSpace(sourceType))
+            {
+                return false;
+            }
+
+            string lower = sourceType.ToLowerInvariant();
+            return IsExplicitFixedWidthIntegralType(lower) ||
+                   ContainsTypeWord(lower, "__int8") ||
+                   ContainsTypeWord(lower, "__int16") ||
+                   ContainsTypeWord(lower, "__int32") ||
+                   ContainsTypeWord(lower, "__int64");
         }
 
         private Dictionary<string, string> ResolveGetterValues(
@@ -1411,6 +1549,7 @@ namespace InlineCppVarDbg
             Dictionary<string, string> values,
             Expressions expressions,
             HashSet<string> requiredIdentifiers,
+            IReadOnlyDictionary<string, string> sourceTypeHints,
             int depth,
             Debugger debugger,
             InlineValueNumericDisplayMode numericDisplayMode,
@@ -1449,7 +1588,7 @@ namespace InlineCppVarDbg
                     }
 
                     stopwatch.Restart();
-                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                    TryAddExpressionValue(values, expression.Name, expression.Type, expression.Value, requiredIdentifiers, sourceTypeHints, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                     RecordPerf("Expression.TryAddExpressionValue", expression.Name, stopwatch.ElapsedMilliseconds);
                 }
                 catch (COMException)
@@ -1466,7 +1605,7 @@ namespace InlineCppVarDbg
                     Stopwatch stopwatch = Stopwatch.StartNew();
                     Expressions dataMembers = expression.DataMembers;
                     RecordPerf("Expression.DataMembers", expression.Name, stopwatch.ElapsedMilliseconds);
-                    AddExpressionValues(values, dataMembers, requiredIdentifiers, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
+                    AddExpressionValues(values, dataMembers, requiredIdentifiers, sourceTypeHints, depth + 1, debugger, numericDisplayMode, enumValueRenderMode, evaluationKinds, ruleKinds, typeRuleKinds, customRules);
                 }
                 catch (COMException)
                 {
@@ -1480,6 +1619,7 @@ namespace InlineCppVarDbg
             string type,
             string rawValue,
             HashSet<string> requiredIdentifiers,
+            IReadOnlyDictionary<string, string> sourceTypeHints,
             Debugger debugger,
             InlineValueNumericDisplayMode numericDisplayMode,
             EnumValueRenderMode enumValueRenderMode,
@@ -1514,10 +1654,11 @@ namespace InlineCppVarDbg
             }
 
             string evalExpressionName = needsExact ? name : simpleName;
+            string effectiveType = GetSourceTypeHint(sourceTypeHints, name, simpleName) ?? type;
             if (!TryFormatEligibleValue(
                 debugger,
                 evalExpressionName,
-                type,
+                effectiveType,
                 rawValue,
                 normalized,
                 numericDisplayMode,
@@ -1698,12 +1839,17 @@ namespace InlineCppVarDbg
             out string displayValue)
         {
             displayValue = normalizedValue;
-            if (numericDisplayMode == InlineValueNumericDisplayMode.Decimal)
+            if (!IsIntegralScalarType(type))
             {
                 return false;
             }
 
-            if (!IsIntegralScalarType(type))
+            if (TryFormatFixedWidthIntegerValue(numericDisplayMode, type, normalizedValue, out displayValue))
+            {
+                return true;
+            }
+
+            if (numericDisplayMode == InlineValueNumericDisplayMode.Decimal)
             {
                 return false;
             }
@@ -1735,14 +1881,192 @@ namespace InlineCppVarDbg
             }
 
             int byteValue = (int)(((numericValue % 256) + 256) % 256);
-            string numericDisplay = numericValue.ToString(CultureInfo.InvariantCulture);
-            if (numericDisplayMode != InlineValueNumericDisplayMode.Decimal)
+            bool isNegative = numericValue < 0;
+            ulong magnitude = isNegative
+                ? (ulong)(-(numericValue + 1)) + 1UL
+                : (ulong)numericValue;
+            string numericDisplay;
+            if (TryBuildFixedWidthIntegerDisplayParts(
+                numericDisplayMode,
+                isNegative,
+                magnitude,
+                out string primaryDisplay,
+                out List<string> supplementalDisplays))
             {
-                TryFormatNumericLiteral(numericDisplayMode, numericDisplay, out numericDisplay);
+                numericDisplay = primaryDisplay;
+                if (supplementalDisplays.Count > 0)
+                {
+                    numericDisplay += ", " + string.Join(", ", supplementalDisplays);
+                }
+            }
+            else
+            {
+                numericDisplay = FormatIntegerByDisplayMode(numericDisplayMode, isNegative, magnitude);
             }
 
             displayValue = "'" + EscapeEightBitCharForChip(byteValue) + "'(" + numericDisplay + ")";
             return true;
+        }
+
+        private static bool TryFormatFixedWidthIntegerValue(
+            InlineValueNumericDisplayMode numericDisplayMode,
+            string type,
+            string normalizedValue,
+            out string displayValue)
+        {
+            displayValue = normalizedValue;
+            if (!IsFixedWidthIntegralScalarType(type))
+            {
+                return false;
+            }
+
+            if (!TryParseIntegerMagnitude(normalizedValue, out bool isNegative, out ulong magnitude))
+            {
+                string leadingToken = ExtractLeadingToken(normalizedValue);
+                if (!TryParseIntegerMagnitude(leadingToken, out isNegative, out magnitude))
+                {
+                    return false;
+                }
+            }
+
+            if (!TryBuildFixedWidthIntegerDisplayParts(
+                numericDisplayMode,
+                isNegative,
+                magnitude,
+                out string primaryDisplay,
+                out List<string> supplementalDisplays))
+            {
+                return false;
+            }
+
+            displayValue = supplementalDisplays.Count == 0
+                ? primaryDisplay
+                : primaryDisplay + " (" + string.Join(", ", supplementalDisplays) + ")";
+            return true;
+        }
+
+        private static bool TryBuildFixedWidthIntegerDisplayParts(
+            InlineValueNumericDisplayMode numericDisplayMode,
+            bool isNegative,
+            ulong magnitude,
+            out string primaryDisplay,
+            out List<string> supplementalDisplays)
+        {
+            primaryDisplay = FormatIntegerByDisplayMode(numericDisplayMode, isNegative, magnitude);
+            supplementalDisplays = new List<string>();
+
+            bool showHexAndDecimal = !isNegative && magnitude > 0x0FUL && magnitude < 0xFFFFUL;
+            string sizeDisplay = TryFormatPowerOf1024Value(isNegative, magnitude);
+            if (!showHexAndDecimal && string.IsNullOrEmpty(sizeDisplay))
+            {
+                return false;
+            }
+
+            if (numericDisplayMode != InlineValueNumericDisplayMode.Decimal &&
+                (showHexAndDecimal || !string.IsNullOrEmpty(sizeDisplay)))
+            {
+                supplementalDisplays.Add(FormatSignedDecimal(isNegative, magnitude));
+            }
+
+            if (showHexAndDecimal && numericDisplayMode != InlineValueNumericDisplayMode.Hexadecimal)
+            {
+                supplementalDisplays.Add(FormatSignedHex(isNegative, magnitude));
+            }
+
+            if (!string.IsNullOrEmpty(sizeDisplay))
+            {
+                supplementalDisplays.Add(sizeDisplay);
+            }
+
+            return true;
+        }
+
+        private static string TryFormatPowerOf1024Value(bool isNegative, ulong magnitude)
+        {
+            if (isNegative || magnitude < 1024UL || magnitude % 1024UL != 0)
+            {
+                return null;
+            }
+
+            ulong[] unitValues =
+            {
+                1024UL * 1024UL * 1024UL * 1024UL * 1024UL,
+                1024UL * 1024UL * 1024UL * 1024UL,
+                1024UL * 1024UL * 1024UL,
+                1024UL * 1024UL,
+                1024UL
+            };
+            string[] unitSuffixes = { "p", "t", "g", "m", "k" };
+
+            for (int i = 0; i < unitValues.Length; i++)
+            {
+                if (magnitude % unitValues[i] == 0)
+                {
+                    return (magnitude / unitValues[i]).ToString(CultureInfo.InvariantCulture) + unitSuffixes[i];
+                }
+            }
+
+            return null;
+        }
+
+        private static string FormatIntegerByDisplayMode(
+            InlineValueNumericDisplayMode numericDisplayMode,
+            bool isNegative,
+            ulong magnitude)
+        {
+            switch (numericDisplayMode)
+            {
+                case InlineValueNumericDisplayMode.Hexadecimal:
+                    return FormatSignedHex(isNegative, magnitude);
+                case InlineValueNumericDisplayMode.Binary:
+                    return FormatSignedBinary(isNegative, magnitude);
+                default:
+                    return FormatSignedDecimal(isNegative, magnitude);
+            }
+        }
+
+        private static string FormatSignedDecimal(bool isNegative, ulong magnitude)
+        {
+            string text = magnitude.ToString(CultureInfo.InvariantCulture);
+            return isNegative ? "-" + text : text;
+        }
+
+        private static string FormatSignedHex(bool isNegative, ulong magnitude)
+        {
+            string text = "0x" + magnitude.ToString("X", CultureInfo.InvariantCulture);
+            return isNegative ? "-" + text : text;
+        }
+
+        private static string FormatSignedBinary(bool isNegative, ulong magnitude)
+        {
+            string text = "0b" + FormatUnsignedBinary(magnitude);
+            return isNegative ? "-" + text : text;
+        }
+
+        private static string FormatUnsignedBinary(ulong magnitude)
+        {
+            if (magnitude == 0)
+            {
+                return "0";
+            }
+
+            var builder = new StringBuilder(64);
+            bool started = false;
+            for (int bit = 63; bit >= 0; bit--)
+            {
+                bool set = (magnitude & (1UL << bit)) != 0;
+                if (set)
+                {
+                    started = true;
+                }
+
+                if (started)
+                {
+                    builder.Append(set ? '1' : '0');
+                }
+            }
+
+            return builder.ToString();
         }
 
         private static bool TryParseEightBitIntegerValue(string rawValue, string normalizedValue, out long numericValue)
@@ -1987,6 +2311,75 @@ namespace InlineCppVarDbg
 
             parsed = (long)unsignedValue;
             return true;
+        }
+
+        private static bool TryParseIntegerMagnitude(string value, out bool isNegative, out ulong magnitude)
+        {
+            isNegative = false;
+            magnitude = 0;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string trimmed = value.Trim();
+            if (trimmed.Length == 0)
+            {
+                return false;
+            }
+
+            int end = trimmed.Length - 1;
+            while (end >= 0 && char.IsWhiteSpace(trimmed[end]))
+            {
+                end--;
+            }
+
+            while (end >= 0)
+            {
+                char suffix = trimmed[end];
+                if (suffix == 'u' || suffix == 'U' || suffix == 'l' || suffix == 'L')
+                {
+                    end--;
+                    continue;
+                }
+
+                break;
+            }
+
+            if (end < 0)
+            {
+                return false;
+            }
+
+            string core = trimmed.Substring(0, end + 1).Trim();
+            if (core.Length == 0)
+            {
+                return false;
+            }
+
+            if (core[0] == '+' || core[0] == '-')
+            {
+                isNegative = core[0] == '-';
+                core = core.Substring(1).Trim();
+                if (core.Length == 0)
+                {
+                    return false;
+                }
+            }
+
+            NumberStyles styles = NumberStyles.Integer;
+            if (core.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                core = core.Substring(2);
+                if (core.Length == 0)
+                {
+                    return false;
+                }
+
+                styles = NumberStyles.AllowHexSpecifier;
+            }
+
+            return ulong.TryParse(core, styles, CultureInfo.InvariantCulture, out magnitude);
         }
 
         private static bool TryReadEnumIntegerValue(Debugger debugger, string expressionText, out string integerText)
@@ -2313,6 +2706,30 @@ namespace InlineCppVarDbg
                    ContainsTypeWord(lower, "uint8") ||
                    ContainsTypeWord(lower, "uint8_t") ||
                    ContainsTypeWord(lower, "__int8");
+        }
+
+        private static bool IsFixedWidthIntegralScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type) || !IsIntegralScalarType(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            if (ContainsTypeWord(lower, "char") ||
+                ContainsTypeWord(lower, "char8_t") ||
+                ContainsTypeWord(lower, "char16_t") ||
+                ContainsTypeWord(lower, "char32_t") ||
+                ContainsTypeWord(lower, "wchar_t"))
+            {
+                return false;
+            }
+
+            return IsExplicitFixedWidthIntegralType(lower) ||
+                   ContainsTypeWord(lower, "__int8") ||
+                   ContainsTypeWord(lower, "__int16") ||
+                   ContainsTypeWord(lower, "__int32") ||
+                   ContainsTypeWord(lower, "__int64");
         }
 
         private static bool LooksLikeEnumSymbolValue(string rawValue, string normalizedValue)
@@ -6823,7 +7240,12 @@ namespace InlineCppVarDbg
                 bufferPoint = bufferPoint.TranslateTo(snapshot, PointTrackingMode.Positive);
             }
 
-            return TryResolveManualGetterRequestAtPoint(snapshot, context, bufferPoint, out expressionText, out lineNumber);
+            if (TryResolveManualGetterRequestAtPoint(snapshot, context, bufferPoint, out expressionText, out lineNumber))
+            {
+                return true;
+            }
+
+            return TryResolveManualGetterRequestNearCaret(snapshot, context, bufferPoint, out expressionText, out lineNumber);
         }
 
         private bool TryResolveManualGetterRequest(Point mousePosition, out string expressionText, out int lineNumber)
@@ -6906,6 +7328,125 @@ namespace InlineCppVarDbg
             }
 
             return false;
+        }
+
+        private bool TryResolveManualGetterRequestNearCaret(
+            ITextSnapshot snapshot,
+            DebuggerBridge.BreakContext context,
+            SnapshotPoint bufferPoint,
+            out string expressionText,
+            out int lineNumber)
+        {
+            expressionText = null;
+            lineNumber = -1;
+            if (snapshot == null)
+            {
+                return false;
+            }
+
+            if (bufferPoint.Snapshot != snapshot)
+            {
+                if (bufferPoint.Snapshot?.TextBuffer != snapshot.TextBuffer)
+                {
+                    return false;
+                }
+
+                bufferPoint = bufferPoint.TranslateTo(snapshot, PointTrackingMode.Positive);
+            }
+
+            if (!PathsEqual(normalizedDocumentPath, NormalizePath(context.FileName)))
+            {
+                return false;
+            }
+
+            ITextSnapshotLine caretLine = bufferPoint.GetContainingLine();
+            if (TryResolveFirstManualGetterRequestOnLine(caretLine, out expressionText))
+            {
+                lineNumber = caretLine.LineNumber;
+                return true;
+            }
+
+            if (TryFindNextStatementLine(snapshot, caretLine.LineNumber + 1, out ITextSnapshotLine nextStatementLine) &&
+                TryResolveFirstManualGetterRequestOnLine(nextStatementLine, out expressionText))
+            {
+                lineNumber = nextStatementLine.LineNumber;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryResolveFirstManualGetterRequestOnLine(
+            ITextSnapshotLine line,
+            out string expressionText)
+        {
+            expressionText = null;
+            if (line == null)
+            {
+                return false;
+            }
+
+            string lineText = line.GetText();
+            List<CppCurrentLineTokenizer.IdentifierToken> tokens = CppCurrentLineTokenizer.TokenizeIdentifiers(lineText);
+            foreach (CppCurrentLineTokenizer.IdentifierToken token in tokens)
+            {
+                if (!IsPotentialGetterCallToken(lineText, token) ||
+                    !TryFindGetterCallSpan(lineText, token, out _, out _, out _) ||
+                    !TryParseGetterCall(lineText, token, out GetterCallToken getterCall, out _))
+                {
+                    continue;
+                }
+
+                expressionText = getterCall.ExpressionText;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryFindNextStatementLine(
+            ITextSnapshot snapshot,
+            int startLineNumber,
+            out ITextSnapshotLine statementLine)
+        {
+            statementLine = null;
+            if (snapshot == null)
+            {
+                return false;
+            }
+
+            for (int lineNumber = Math.Max(0, startLineNumber); lineNumber < snapshot.LineCount; lineNumber++)
+            {
+                ITextSnapshotLine line = snapshot.GetLineFromLineNumber(lineNumber);
+                if (IsStatementCandidateLine(line.GetText()))
+                {
+                    statementLine = line;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsStatementCandidateLine(string lineText)
+        {
+            if (string.IsNullOrWhiteSpace(lineText))
+            {
+                return false;
+            }
+
+            string trimmed = lineText.Trim();
+            if (trimmed.Length == 0 ||
+                trimmed == "{" ||
+                trimmed == "}" ||
+                trimmed == "};" ||
+                trimmed.StartsWith("//", StringComparison.Ordinal) ||
+                trimmed.StartsWith("#", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
