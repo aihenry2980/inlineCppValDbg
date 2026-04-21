@@ -1849,6 +1849,11 @@ namespace InlineCppVarDbg
                 return true;
             }
 
+            if (TryFormatUnsignedIntegralValue(numericDisplayMode, type, normalizedValue, out displayValue))
+            {
+                return true;
+            }
+
             if (numericDisplayMode == InlineValueNumericDisplayMode.Decimal)
             {
                 return false;
@@ -1936,12 +1941,49 @@ namespace InlineCppVarDbg
                 out string primaryDisplay,
                 out List<string> supplementalDisplays))
             {
-                return false;
+                if (numericDisplayMode == InlineValueNumericDisplayMode.Decimal)
+                {
+                    return false;
+                }
+
+                displayValue = FormatIntegerByDisplayMode(numericDisplayMode, isNegative, magnitude);
+                return true;
             }
 
             displayValue = supplementalDisplays.Count == 0
                 ? primaryDisplay
                 : primaryDisplay + " (" + string.Join(", ", supplementalDisplays) + ")";
+            return true;
+        }
+
+        private static bool TryFormatUnsignedIntegralValue(
+            InlineValueNumericDisplayMode numericDisplayMode,
+            string type,
+            string normalizedValue,
+            out string displayValue)
+        {
+            displayValue = normalizedValue;
+            if (numericDisplayMode == InlineValueNumericDisplayMode.Decimal ||
+                !IsUnsignedIntegralScalarType(type))
+            {
+                return false;
+            }
+
+            if (!TryParseIntegerMagnitude(normalizedValue, out bool isNegative, out ulong magnitude))
+            {
+                string leadingToken = ExtractLeadingToken(normalizedValue);
+                if (!TryParseIntegerMagnitude(leadingToken, out isNegative, out magnitude))
+                {
+                    return false;
+                }
+            }
+
+            if (isNegative)
+            {
+                return false;
+            }
+
+            displayValue = FormatIntegerByDisplayMode(numericDisplayMode, false, magnitude);
             return true;
         }
 
@@ -2684,6 +2726,38 @@ namespace InlineCppVarDbg
                    ContainsTypeWord(typeLower, "uint64_t");
         }
 
+        private static bool IsLongLongIntegralType(string typeLower)
+        {
+            if (string.IsNullOrWhiteSpace(typeLower))
+            {
+                return false;
+            }
+
+            string normalized = typeLower
+                .Replace('(', ' ')
+                .Replace(')', ' ')
+                .Replace(',', ' ')
+                .Replace('<', ' ')
+                .Replace('>', ' ')
+                .Replace(':', ' ');
+
+            string[] tokens = normalized.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            int longCount = 0;
+            foreach (string token in tokens)
+            {
+                if (string.Equals(token, "long", StringComparison.OrdinalIgnoreCase))
+                {
+                    longCount++;
+                    if (longCount >= 2)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private static bool IsEightBitIntegralScalarType(string type)
         {
             if (string.IsNullOrWhiteSpace(type) || !IsIntegralScalarType(type))
@@ -2726,10 +2800,36 @@ namespace InlineCppVarDbg
             }
 
             return IsExplicitFixedWidthIntegralType(lower) ||
+                   IsLongLongIntegralType(lower) ||
                    ContainsTypeWord(lower, "__int8") ||
                    ContainsTypeWord(lower, "__int16") ||
                    ContainsTypeWord(lower, "__int32") ||
                    ContainsTypeWord(lower, "__int64");
+        }
+
+        private static bool IsUnsignedIntegralScalarType(string type)
+        {
+            if (string.IsNullOrWhiteSpace(type) || !IsIntegralScalarType(type))
+            {
+                return false;
+            }
+
+            string lower = type.ToLowerInvariant();
+            if (ContainsTypeWord(lower, "char") ||
+                ContainsTypeWord(lower, "char8_t") ||
+                ContainsTypeWord(lower, "char16_t") ||
+                ContainsTypeWord(lower, "char32_t") ||
+                ContainsTypeWord(lower, "wchar_t"))
+            {
+                return false;
+            }
+
+            return ContainsTypeWord(lower, "unsigned") ||
+                   ContainsTypeWord(lower, "uint") ||
+                   ContainsTypeWord(lower, "size_t") ||
+                   ContainsTypeWord(lower, "byte") ||
+                   ContainsTypeWord(lower, "word") ||
+                   ContainsTypeWord(lower, "dword");
         }
 
         private static bool LooksLikeEnumSymbolValue(string rawValue, string normalizedValue)
